@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  color: #1e293b;
+  background: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.vendor-form-input:autofill {
+  color: #f1f5f9;
+  background-color: #020617;
+}
+
+.vendor-form-input:-webkit-autofill,
+.vendor-form-input:-webkit-autofill:hover,
+.vendor-form-input:-webkit-autofill:focus,
+.vendor-form-input:-webkit-autofill:active {
+  -webkit-text-fill-color: #f1f5f9;
+  -webkit-box-shadow: 0 0 0 1000px #020617 inset;
+  transition: background-color 9999s ease-out 0s;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#root {
+  min-height: 100vh;
+  width: 100%;
+}
+
+@page {
+  margin: 12mm;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .reports-printable,
+  .reports-printable * {
+    visibility: visible !important;
+  }
+
+  .reports-printable {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    color: #0f172a !important;
+  }
+
+  .reports-printable .reports-screen-only {
+    display: none !important;
+  }
+
+  .reports-printable table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+  }
+
+  .reports-printable thead {
+    display: table-header-group;
+  }
+
+  .reports-printable tr {
+    break-inside: avoid;
+  }
+
+  .reports-printable th,
+  .reports-printable td {
+    border: 1px solid #cbd5e1;
+    padding: 6px;
+  }
+}

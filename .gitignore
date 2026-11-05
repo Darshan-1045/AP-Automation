@@ -1,0 +1,98 @@
+
+# ==========================================
+# ENVIRONMENT VARIABLES & SECRETS
+# ==========================================
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# ==========================================
+# FRONTEND - NODE / REACT / VITE
+# ==========================================
+node_modules/
+frontend/node_modules/
+
+dist/
+frontend/dist/
+
+.vite/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ==========================================
+# BACKEND - PYTHON / DJANGO
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+venv/
+.venv/
+env/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+pip-wheel-metadata/
+
+# Django generated files
+staticfiles/
+local_settings.py
+
+# ==========================================
+# DATABASE FILES
+# ==========================================
+*.sqlite3
+*.sqlite3-journal
+*.db
+
+# ==========================================
+# UPLOADED DOCUMENTS & MEDIA
+# ==========================================
+# Keep private uploaded invoices out of Git
+Backend/media/
+Backend/invoices/invoices/
+
+# ==========================================
+# LOCAL TEST DOCUMENTS & OUTPUT
+# ==========================================
+Backend/sample_invoice.pdf
+Backend/invoices/sample_invoice.pdf
+frontend/page_1.png
+
+test-results/
+playwright-report/
+
+# ==========================================
+# EDITOR / IDE
+# ==========================================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# ==========================================
+# OPERATING SYSTEM
+# ==========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# TEMPORARY / BACKUP FILES
+# ==========================================
+*.tmp
+*.temp
+*.bak
+*.old
+*.pid

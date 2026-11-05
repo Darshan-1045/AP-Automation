@@ -1,0 +1,112 @@
+
+from django.urls import path
+
+from .views import (
+    InvoiceBulkUploadAPIView,
+    InvoiceListCreateAPIView,
+    InvoiceDetailAPIView,
+    InvoiceDocumentAPIView,
+    ApproveInvoiceAPIView,
+    RejectInvoiceAPIView,
+    MarkInvoicePaidAPIView,
+    PaymentActionAPIView,
+    PaymentAdviceAPIView,
+    PaymentListCreateAPIView,
+    VendorListCreateAPIView,
+    VendorDetailAPIView,
+)
+from .procurement_views import (
+    GoodsReceiptDetailAPIView,
+    GoodsReceiptListCreateAPIView,
+    InvoiceMatchingAPIView,
+    PurchaseOrderDetailAPIView,
+    PurchaseOrderListCreateAPIView,
+)
+
+urlpatterns = [
+    path(
+        "payments/",
+        PaymentListCreateAPIView.as_view(),
+        name="payment-list-create",
+    ),
+    path(
+        "payments/<int:pk>/status/",
+        PaymentActionAPIView.as_view(),
+        name="payment-status",
+    ),
+    path(
+        "payments/<int:pk>/advice/",
+        PaymentAdviceAPIView.as_view(),
+        name="payment-advice",
+    ),
+    path(
+        "bulk/",
+        InvoiceBulkUploadAPIView.as_view(),
+        name="invoice-bulk-upload",
+    ),
+    path(
+        "",
+        InvoiceListCreateAPIView.as_view(),
+        name="invoice-list-create",
+    ),
+    path(
+        "<int:pk>/",
+        InvoiceDetailAPIView.as_view(),
+        name="invoice-detail",
+    ),
+    path(
+        "<int:pk>/document/",
+        InvoiceDocumentAPIView.as_view(),
+        name="invoice-document",
+    ),
+    path(
+        "<int:pk>/approve/",
+        ApproveInvoiceAPIView.as_view(),
+        name="invoice-approve",
+    ),
+    path(
+        "<int:pk>/reject/",
+        RejectInvoiceAPIView.as_view(),
+        name="invoice-reject",
+    ),
+    path(
+    "<int:pk>/pay/",
+    MarkInvoicePaidAPIView.as_view(),
+    name="invoice-pay",
+    ),
+    path(
+    "vendors/",
+    VendorListCreateAPIView.as_view(),
+    name="vendor-list-create",
+    ),
+    path(
+        "vendors/<int:pk>/",
+        VendorDetailAPIView.as_view(),
+        name="vendor-detail",
+    ),
+    path(
+        "purchase-orders/",
+        PurchaseOrderListCreateAPIView.as_view(),
+        name="purchase-order-list-create",
+    ),
+    path(
+        "purchase-orders/<int:pk>/",
+        PurchaseOrderDetailAPIView.as_view(),
+        name="purchase-order-detail",
+    ),
+    path(
+        "goods-receipts/",
+        GoodsReceiptListCreateAPIView.as_view(),
+        name="goods-receipt-list-create",
+    ),
+    path(
+        "goods-receipts/<int:pk>/",
+        GoodsReceiptDetailAPIView.as_view(),
+        name="goods-receipt-detail",
+    ),
+    path(
+        "<int:pk>/match/",
+        InvoiceMatchingAPIView.as_view(),
+        name="invoice-match",
+    ),
+]
