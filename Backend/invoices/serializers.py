@@ -19,12 +19,6 @@ from .models import (
     PurchaseOrderItem,
     Vendor,
 )
-from .permissions import (
-    ADMIN_ROLE,
-    AP_MANAGER_ROLE,
-    FINANCE_ROLE,
-    has_any_role,
-)
 
 MAX_INVOICE_FILE_SIZE = 25 * 1024 * 1024
 INVOICE_FILE_SIGNATURES = {
@@ -260,28 +254,6 @@ class VendorSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["id", "created_at", "updated_at"]
 
-    def _can_view_bank_details(self):
-        request = self.context.get("request")
-        return bool(
-            request
-            and has_any_role(
-                request.user,
-                {ADMIN_ROLE, AP_MANAGER_ROLE, FINANCE_ROLE},
-            )
-        )
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        if not self._can_view_bank_details():
-            account_number = data.get("bank_account_number", "")
-            data["bank_account_number"] = (
-                f"{'*' * max(len(account_number) - 4, 0)}{account_number[-4:]}"
-                if account_number else ""
-            )
-            data.pop("bank_account_name", None)
-            data.pop("bank_ifsc", None)
-        return data
-
     def validate_gstin(self, value):
         if value:
             value = value.strip().upper()
@@ -313,31 +285,6 @@ class VendorSerializer(serializers.ModelSerializer):
         if value and not re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", value):
             raise serializers.ValidationError("Enter a valid IFSC code.")
         return value
-
-    def validate(self, attrs):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        bank_fields = {
-            "bank_account_name",
-            "bank_account_number",
-            "bank_ifsc",
-        }
-        if bank_fields.intersection(attrs) and not has_any_role(
-            user,
-            {ADMIN_ROLE, AP_MANAGER_ROLE},
-        ):
-            raise serializers.ValidationError({
-                "bank_details": "Only Admin or AP Manager can update bank details."
-            })
-        if (
-            "onboarding_status" in attrs
-            and not has_any_role(user, {ADMIN_ROLE, AP_MANAGER_ROLE})
-        ):
-            raise serializers.ValidationError({
-                "onboarding_status": "Only Admin or AP Manager can change onboarding status."
-            })
-        return attrs
-
 
 class PaymentSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)

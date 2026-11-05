@@ -10,7 +10,6 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
 from django.core.management import call_command
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.authtoken.models import Token
@@ -35,23 +34,16 @@ from .models import (
 from .serializers import InvoiceSerializer
 
 
-def authenticated_client(role="Admin"):
+def authenticated_client(user_label="default"):
     user_model = get_user_model()
-    username = f"test-{role.lower().replace(' ', '-')}"
-    is_admin = role == "Admin"
-    user, _ = user_model.objects.get_or_create(
-        username=username,
-        defaults={"is_superuser": is_admin, "is_staff": is_admin},
-    )
-    if not is_admin:
-        group, _ = Group.objects.get_or_create(name=role)
-        user.groups.add(group)
+    username = f"test-{user_label.lower().replace(' ', '-')}"
+    user, _ = user_model.objects.get_or_create(username=username)
     client = APIClient()
     client.force_authenticate(user=user)
     return client
 
 
-class AuthenticationPermissionTests(TestCase):
+class AuthenticationTests(TestCase):
     def setUp(self):
         user_model = get_user_model()
         self.user = user_model.objects.create_user(
@@ -59,8 +51,6 @@ class AuthenticationPermissionTests(TestCase):
             email="approval-user@example.com",
             password="secure-test-password",
         )
-        self.approver_group, _ = Group.objects.get_or_create(name="Approver")
-        self.user.groups.add(self.approver_group)
         self.client = APIClient()
 
     def create_invoice(self, **overrides):
@@ -89,6 +79,18 @@ class AuthenticationPermissionTests(TestCase):
     def test_protected_invoice_endpoint_rejects_anonymous_user(self):
         response = self.client.get("/api/invoices/")
         self.assertEqual(response.status_code, 401)
+
+    def test_application_apis_reject_anonymous_users(self):
+        for path in (
+            "/api/dashboard/",
+            "/api/invoices/vendors/",
+            "/api/invoices/payments/",
+            "/api/invoices/purchase-orders/",
+            "/api/invoices/goods-receipts/",
+            "/api/reports/",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 401)
 
     def test_invoice_documents_require_authentication(self):
         invoice = self.create_invoice()
@@ -126,7 +128,7 @@ class AuthenticationPermissionTests(TestCase):
         self.assertEqual(response["X-Content-Type-Options"], "nosniff")
         self.assertIn(b"protected test document", b"".join(response.streaming_content))
 
-    def test_token_login_returns_role_information(self):
+    def test_token_login_and_current_user_return_identity_only(self):
         response = self.client.post(
             "/api/auth/token/",
             {"email": "approval-user@example.com", "password": "secure-test-password"},
@@ -136,8 +138,17 @@ class AuthenticationPermissionTests(TestCase):
         self.assertTrue(response.data["token"])
         self.assertEqual(response.data["email"], "approval-user@example.com")
         self.assertNotIn("roles", response.data)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Token {response.data['token']}"
+        )
+        current_user = self.client.get("/api/auth/me/")
+        self.assertEqual(current_user.status_code, 200)
+        self.assertEqual(current_user.data["email"], "approval-user@example.com")
+        self.assertNotIn("roles", current_user.data)
+        self.assertNotIn("permissions", current_user.data)
+        self.assertNotIn("capabilities", current_user.data)
 
-    def test_registration_hashes_password_and_does_not_assign_roles(self):
+    def test_registration_hashes_password_without_assigning_groups(self):
         response = self.client.post(
             "/api/auth/register/",
             {
@@ -153,7 +164,161 @@ class AuthenticationPermissionTests(TestCase):
         self.assertNotEqual(user.password, "Strong-test-password-2026")
         self.assertTrue(user.check_password("Strong-test-password-2026"))
         self.assertEqual(user.get_full_name(), "New AP User")
-        self.assertFalse(user.groups.exists())
+        self.assertEqual(user.groups.count(), 0)
+
+    def test_registered_user_can_log_in_without_self_assigning_a_role(self):
+        registration = self.client.post(
+            "/api/auth/register/",
+            {
+                "full_name": "New AP User",
+                "email": "new.user@example.com",
+                "password": "Strong-test-password-2026",
+                "confirm_password": "Strong-test-password-2026",
+                "role": "Admin",
+            },
+            format="json",
+        )
+        self.assertEqual(registration.status_code, 201, registration.data)
+
+        login = self.client.post(
+            "/api/auth/token/",
+            {
+                "email": "new.user@example.com",
+                "password": "Strong-test-password-2026",
+            },
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200, login.data)
+
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Token {login.data['token']}"
+        )
+        current_user = self.client.get("/api/auth/me/")
+        self.assertEqual(current_user.status_code, 200, current_user.data)
+        self.assertNotIn("roles", current_user.data)
+        self.assertNotIn("permissions", current_user.data)
+        registered_user = get_user_model().objects.get(email="new.user@example.com")
+        self.assertEqual(registered_user.groups.count(), 0)
+
+    def test_authenticated_user_can_create_vendor(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            "/api/invoices/vendors/",
+            {"vendor_name": "Unauthorized Vendor"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_authenticated_user_can_create_update_and_view_vendor_and_bank_details(self):
+        client = authenticated_client("vendor-operator")
+        created = client.post(
+            "/api/invoices/vendors/",
+            {
+                "vendor_name": "Authorized Vendor",
+                "gstin": "27AAPFU0939F1ZV",
+                "bank_account_name": "Authorized Name",
+                "bank_account_number": "123456789012",
+                "bank_ifsc": "ABCD0123456",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data["bank_account_number"], "123456789012")
+
+        vendor_id = created.data["id"]
+        updated = client.patch(
+            f"/api/invoices/vendors/{vendor_id}/",
+            {
+                "phone": "1234567890",
+                "bank_account_number": "987654321012",
+            },
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200, updated.data)
+        self.assertEqual(updated.data["phone"], "1234567890")
+        self.assertEqual(updated.data["bank_account_number"], "987654321012")
+        self.assertEqual(
+            client.get(f"/api/invoices/vendors/{vendor_id}/").status_code,
+            200,
+        )
+
+    def test_authenticated_user_can_view_vendor_bank_details(self):
+        vendor = Vendor.objects.create(
+            vendor_name="Bank Protected Vendor",
+            bank_account_name="Protected Name",
+            bank_account_number="123456789012",
+            bank_ifsc="ABCD0123456",
+        )
+        viewer = get_user_model().objects.create_user(
+            username="bank-viewer",
+            password="secure-test-password",
+        )
+        client = APIClient()
+        client.force_authenticate(user=viewer)
+
+        response = client.get(f"/api/invoices/vendors/{vendor.pk}/")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["bank_account_number"], "123456789012")
+        self.assertEqual(response.data["bank_account_name"], "Protected Name")
+        self.assertEqual(response.data["bank_ifsc"], "ABCD0123456")
+
+    def test_authenticated_user_can_list_create_and_update_payment_requests(self):
+        invoice = self.create_invoice(status=Invoice.Status.APPROVED)
+        self.client.force_authenticate(user=self.user)
+        self.assertEqual(self.client.get("/api/invoices/payments/").status_code, 200)
+
+        created = self.client.post(
+            "/api/invoices/payments/",
+            {
+                "invoice": invoice.pk,
+                "amount": "118.00",
+                "payment_method": Invoice.PaymentMethod.BANK_TRANSFER,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        updated = self.client.post(
+            f"/api/invoices/payments/{created.data['id']}/status/",
+            {"status": Payment.Status.APPROVED},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, 200, updated.data)
+
+        updated_again = self.client.post(
+            f"/api/invoices/payments/{created.data['id']}/status/",
+            {"status": Payment.Status.PROCESSING},
+            format="json",
+        )
+        self.assertEqual(updated_again.status_code, 200, updated_again.data)
+
+    def test_authenticated_user_can_view_all_invoices(self):
+        assigned_invoice = self.create_invoice(
+            invoice_number="INV-AUTH-APPROVER",
+            status=Invoice.Status.VALIDATED,
+        )
+        second_invoice = self.create_invoice(
+            invoice_number="INV-AUTH-ACCOUNTANT",
+            status=Invoice.Status.VALIDATED,
+            subtotal="200.00",
+            total_amount="218.00",
+        )
+        ApprovalRule.objects.create(
+            role="Unused legacy label",
+            approval_level=1,
+            minimum_amount="200.00",
+            maximum_amount=None,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/invoices/")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            {row["id"] for row in response.data},
+            {assigned_invoice.pk, second_invoice.pk},
+        )
+        detail = self.client.get(f"/api/invoices/{second_invoice.pk}/")
+        self.assertEqual(detail.status_code, 200)
 
     def test_registration_rejects_duplicate_email_case_insensitively(self):
         self.user.email = "Existing@example.com"
@@ -183,7 +348,7 @@ class AuthenticationPermissionTests(TestCase):
         )
         self.assertEqual(client.get("/api/auth/me/").status_code, 401)
 
-    def test_approver_can_approve_valid_invoice(self):
+    def test_authenticated_user_can_approve_valid_invoice(self):
         self.client.force_authenticate(user=self.user)
         invoice = self.create_invoice()
 
@@ -194,7 +359,7 @@ class AuthenticationPermissionTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.data)
 
-    def test_approver_cannot_process_payment(self):
+    def test_authenticated_user_can_process_payment(self):
         self.client.force_authenticate(user=self.user)
         invoice = self.create_invoice(
             status=Invoice.Status.APPROVED,
@@ -210,16 +375,16 @@ class AuthenticationPermissionTests(TestCase):
             },
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200, response.data)
 
-    def test_finance_user_cannot_approve_invoice(self):
+    def test_authenticated_user_can_approve_invoice(self):
         invoice = self.create_invoice()
-        response = authenticated_client("Finance").post(
+        response = authenticated_client().post(
             f"/api/invoices/{invoice.pk}/approve/",
             {},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200, response.data)
 
 
 class InvoiceBulkUploadTests(TestCase):
@@ -424,7 +589,7 @@ class InvoiceWorkflowTests(TestCase):
             validation_status="INVALID",
             validation_errors=["Invoice needs correction."],
         )
-        self.client = authenticated_client("Approver")
+        self.client = authenticated_client("workflow-user")
 
     def test_review_required_invoice_can_be_rejected_with_a_reason(self):
         response = self.client.post(
@@ -460,7 +625,7 @@ class InvoiceWorkflowTests(TestCase):
         self.assertFalse(self.invoice.approval_history.exists())
 
     def test_inactive_vendor_cannot_be_paid(self):
-        client = authenticated_client("Finance")
+        client = authenticated_client("payment-user")
         self.vendor.is_active = False
         self.vendor.save(update_fields=["is_active"])
         self.invoice.status = Invoice.Status.APPROVED
@@ -483,18 +648,18 @@ class InvoiceWorkflowTests(TestCase):
         self.invoice.refresh_from_db()
         self.assertEqual(self.invoice.status, Invoice.Status.APPROVED)
 
-    def test_multi_level_approval_requires_each_configured_role(self):
+    def test_multi_level_approval_remains_available_to_authenticated_users(self):
         self.invoice.status = Invoice.Status.VALIDATED
         self.invoice.validation_status = "VALID"
         self.invoice.validation_errors = []
         self.invoice.save()
         ApprovalRule.objects.create(
-            role="Approver",
+            role="Unused legacy label 1",
             approval_level=1,
             minimum_amount="0",
         )
         ApprovalRule.objects.create(
-            role="AP Manager",
+            role="Unused legacy label 2",
             approval_level=2,
             minimum_amount="0",
         )
@@ -509,7 +674,7 @@ class InvoiceWorkflowTests(TestCase):
         self.assertEqual(self.invoice.status, Invoice.Status.PENDING_APPROVAL)
         self.assertEqual(self.invoice.approval_level, 1)
 
-        second = authenticated_client("AP Manager").post(
+        second = authenticated_client("second-workflow-user").post(
             f"/api/invoices/{self.invoice.pk}/approve/",
             {"remarks": "Final review"},
             format="json",
@@ -526,7 +691,7 @@ class InvoiceWorkflowTests(TestCase):
             [1, 2],
         )
 
-    def test_vendor_bank_details_are_masked_for_approver(self):
+    def test_authenticated_user_can_read_full_vendor_bank_details(self):
         self.vendor.bank_account_name = "ABC Technologies"
         self.vendor.bank_account_number = "123456789012"
         self.vendor.bank_ifsc = "ABCD0123456"
@@ -535,30 +700,30 @@ class InvoiceWorkflowTests(TestCase):
         response = self.client.get(f"/api/invoices/vendors/{self.vendor.pk}/")
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["bank_account_number"], "********9012")
-        self.assertNotIn("bank_account_name", response.data)
-        self.assertNotIn("bank_ifsc", response.data)
+        self.assertEqual(response.data["bank_account_number"], "123456789012")
+        self.assertEqual(response.data["bank_account_name"], "ABC Technologies")
+        self.assertEqual(response.data["bank_ifsc"], "ABCD0123456")
 
-    def test_approver_cannot_read_full_vendor_bank_details(self):
+    def test_authenticated_users_can_read_vendor_bank_details(self):
         self.vendor.bank_account_number = "123456789012"
         self.vendor.save(update_fields=["bank_account_number"])
-        finance_client = authenticated_client("Finance")
+        finance_client = authenticated_client("second-vendor-user")
 
         response = finance_client.get(f"/api/invoices/vendors/{self.vendor.pk}/")
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["bank_account_number"], "123456789012")
 
-    def test_approver_cannot_change_vendor_bank_details(self):
+    def test_authenticated_user_can_change_vendor_bank_details(self):
         response = self.client.patch(
             f"/api/invoices/vendors/{self.vendor.pk}/",
             {"bank_account_number": "123456789012"},
             format="json",
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200, response.data)
 
     def test_vendor_onboarding_is_persisted_and_bank_changes_are_not_logged(self):
-        manager = authenticated_client("AP Manager")
+        manager = authenticated_client("onboarding-user")
         created = manager.post(
             "/api/invoices/vendors/",
             {
@@ -624,8 +789,8 @@ class PaymentRequestTests(TestCase):
         )
 
     def test_partial_payment_requires_recorded_settlement_and_updates_balance(self):
-        request_client = authenticated_client("AP Manager")
-        finance_client = authenticated_client("Finance")
+        request_client = authenticated_client("payment-request-user")
+        finance_client = authenticated_client("payment-status-user")
         first_response = request_client.post(
             "/api/invoices/payments/",
             {
@@ -703,7 +868,7 @@ class PaymentRequestTests(TestCase):
         self.assertEqual(Payment.objects.filter(invoice=self.invoice).count(), 2)
 
     def test_payment_request_cannot_exceed_updated_outstanding_balance(self):
-        client = authenticated_client("AP Manager")
+        client = authenticated_client("payment-request-user")
         Payment.objects.create(
             invoice=self.invoice,
             amount="70.00",
@@ -730,7 +895,6 @@ class PaymentRequestTests(TestCase):
     DEFAULT_FROM_EMAIL="ap-test@example.com",
     AP_APPROVAL_REMINDER_HOURS=24,
     AP_APPROVAL_ESCALATION_HOURS=72,
-    AP_APPROVAL_ESCALATION_ROLE="AP Manager",
 )
 class ApprovalNotificationCommandTests(TestCase):
     def setUp(self):
@@ -742,18 +906,16 @@ class ApprovalNotificationCommandTests(TestCase):
             validation_status="VALID",
         )
 
-    def add_recipient(self, role, email):
+    def add_recipient(self, email):
         user = get_user_model().objects.create_user(
             username=email,
             email=email,
             password="secure-test-password",
         )
-        group, _ = Group.objects.get_or_create(name=role)
-        user.groups.add(group)
         return user
 
     def test_pending_invoice_sends_a_reminder_and_records_the_event(self):
-        self.add_recipient("Approver", "approver@example.com")
+        self.add_recipient("approver@example.com")
         Invoice.objects.filter(pk=self.invoice.pk).update(
             updated_at=timezone.now() - timedelta(hours=30)
         )
@@ -770,7 +932,7 @@ class ApprovalNotificationCommandTests(TestCase):
         )
 
     def test_overdue_invoice_escalates_and_records_approval_history(self):
-        self.add_recipient("AP Manager", "manager@example.com")
+        self.add_recipient("manager@example.com")
         Invoice.objects.filter(pk=self.invoice.pk).update(
             updated_at=timezone.now() - timedelta(hours=96)
         )

@@ -11,14 +11,6 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.authtoken.models import Token
-from .permissions import (
-    ADMIN_ROLE,
-    AP_MANAGER_ROLE,
-    FINANCE_ROLE,
-    has_any_role,
-)
-
-
 User = get_user_model()
 
 
@@ -139,20 +131,6 @@ class CurrentUserAPIView(APIView):
             "username": request.user.get_username(),
             "email": request.user.email,
             "full_name": _full_name(request.user),
-            "capabilities": {
-                "manage_vendors": has_any_role(
-                    request.user,
-                    {ADMIN_ROLE, AP_MANAGER_ROLE},
-                ),
-                "view_vendor_bank_details": has_any_role(
-                    request.user,
-                    {ADMIN_ROLE, AP_MANAGER_ROLE, FINANCE_ROLE},
-                ),
-                "manage_vendor_bank_details": has_any_role(
-                    request.user,
-                    {ADMIN_ROLE, AP_MANAGER_ROLE},
-                ),
-            },
         })
 
 

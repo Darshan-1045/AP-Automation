@@ -16,12 +16,15 @@ import GoodsReceipts from "./pages/GoodsReceipts";
 import InvoiceMatching from "./pages/InvoiceMatching";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import AuthProvider from "./auth/AuthProvider";
 
 function App() {
   const hasToken = Boolean(window.localStorage.getItem("ap-auth-token"));
   return (
     <BrowserRouter>
-      <AppRoutes hasToken={hasToken} />
+      <AuthProvider>
+        <AppRoutes hasToken={hasToken} />
+      </AuthProvider>
     </BrowserRouter>
   );
 }
@@ -51,20 +54,17 @@ function AppRoutes({ hasToken }) {
           <Route path="/goods-receipts" element={<GoodsReceipts />} />
           <Route path="/matching" element={<InvoiceMatching />} />
 
-          <Route
-            path="/approvals"
-            element={<Approvals />}
-          />
+          <Route path="/approvals" element={<Approvals />} />
 
           <Route path="/payments" element={<Payments />} />
 
-          <Route
-            path="/reports"
-            element={<Reports />}
-          />
+          <Route path="/reports" element={<Reports />} />
         </Route>
 
-        <Route path="/invoices/:id" element={hasToken ? <InvoiceDetails /> : signInRoute} />
+        <Route
+          path="/invoices/:id"
+          element={hasToken ? <InvoiceDetails /> : signInRoute}
+        />
 
        
 

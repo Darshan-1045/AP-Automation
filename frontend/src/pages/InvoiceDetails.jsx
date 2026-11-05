@@ -44,6 +44,11 @@ const InvoiceDetails = () => {
     error: "",
     invoiceId: null,
   });
+  const canEditInvoice = ![
+    "APPROVED",
+    "REJECTED",
+    "PAID",
+  ].includes(invoice?.status);
 
   const populateForm = useCallback((data) => {
     setForm({
@@ -183,6 +188,7 @@ const InvoiceDetails = () => {
 
   const handleSave = async (e) => {
     e.preventDefault();
+    if (!canEditInvoice) return;
 
     try {
       setSaving(true);
@@ -416,6 +422,7 @@ const InvoiceDetails = () => {
 
       {/* Editable Invoice Information */}
       <form onSubmit={handleSave} className="space-y-6">
+        <fieldset disabled={!canEditInvoice} className="space-y-6">
         <section className="rounded-xl border border-slate-200 bg-white p-5">
           <div className="mb-5">
             <h2 className="text-lg font-semibold text-slate-900">
@@ -575,14 +582,14 @@ const InvoiceDetails = () => {
               </p>
             </div>
 
-            <button
+            {canEditInvoice && <button
               type="button"
               onClick={addLineItem}
               className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 px-4 py-2 text-sm font-semibold text-blue-600 transition hover:bg-blue-50"
             >
               <Plus size={16} />
               Add Line Item
-            </button>
+            </button>}
           </div>
 
           <div className="overflow-x-auto">
@@ -689,14 +696,14 @@ const InvoiceDetails = () => {
                       </td>
 
                       <td className="px-4 py-3 text-center">
-                        <button
+                        {canEditInvoice && <button
                           type="button"
                           onClick={() => removeLineItem(index)}
                           title="Remove line item"
                           className="rounded-lg p-2 text-red-500 transition hover:bg-red-50 hover:text-red-700"
                         >
                           <Trash2 size={17} />
-                        </button>
+                        </button>}
                       </td>
                     </tr>
                   ))
@@ -706,7 +713,7 @@ const InvoiceDetails = () => {
                       colSpan="6"
                       className="px-5 py-10 text-center text-sm text-slate-500"
                     >
-                      No line items found. Click "Add Line Item" to add one.
+                      No line items found.
                     </td>
                   </tr>
                 )}
@@ -726,7 +733,7 @@ const InvoiceDetails = () => {
         </section>
 
         {/* Save Button */}
-        <div className="flex justify-end">
+        {canEditInvoice && <div className="flex justify-end">
           <button
             type="submit"
             disabled={saving}
@@ -740,7 +747,8 @@ const InvoiceDetails = () => {
 
             {saving ? "Saving..." : "Save Corrections"}
           </button>
-        </div>
+        </div>}
+        </fieldset>
       </form>
 
       {/* Extracted OCR Text */}

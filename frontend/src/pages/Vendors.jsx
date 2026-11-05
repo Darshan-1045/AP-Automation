@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 
 import vendorService from "../services/vendorService";
-import authService from "../services/authService";
 import LoadingSpinner from "../components/common/LoadingSpinner";
 
 const emptyForm = {
@@ -43,7 +42,6 @@ const Vendors = () => {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [capabilities, setCapabilities] = useState({});
 
   const fetchVendors = useCallback(async (showRefresh = false) => {
     try {
@@ -65,14 +63,6 @@ const Vendors = () => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchVendors();
   }, [fetchVendors]);
-
-  useEffect(() => {
-    authService.getCurrentUser()
-      .then((user) => setCapabilities(user.capabilities || {}))
-      .catch((currentUserError) => {
-        console.error("Unable to load vendor management permissions:", currentUserError);
-      });
-  }, []);
 
   const activeVendors = vendors.filter((vendor) => vendor.is_active);
   const inactiveVendors = vendors.filter((vendor) => !vendor.is_active);
@@ -153,13 +143,9 @@ const Vendors = () => {
         email: form.email.trim(),
         phone: form.phone.trim(),
         address: form.address.trim(),
-        ...(capabilities.manage_vendor_bank_details
-          ? {
-              bank_account_name: form.bank_account_name.trim(),
-              bank_account_number: form.bank_account_number.trim(),
-              bank_ifsc: form.bank_ifsc.trim().toUpperCase(),
-            }
-          : {}),
+        bank_account_name: form.bank_account_name.trim(),
+        bank_account_number: form.bank_account_number.trim(),
+        bank_ifsc: form.bank_ifsc.trim().toUpperCase(),
       };
 
       if (selectedVendor) {
@@ -244,13 +230,13 @@ const Vendors = () => {
             Refresh
           </button>
 
-          {capabilities.manage_vendors && <button
+          <button
             onClick={openAddModal}
             className="flex items-center gap-2 rounded-lg bg-teal-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-teal-400"
           >
             <Plus size={17} />
             Add Vendor
-          </button>}
+          </button>
         </div>
       </div>
 
@@ -435,25 +421,20 @@ const Vendors = () => {
 
                     <td className="px-5 py-4">
                       <div className="flex justify-end gap-2">
-                        {capabilities.manage_vendors && (
-                          <>
-                            <button
-                              onClick={() => openEditModal(vendor)}
-                              title="Edit vendor"
-                              className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-teal-500/50 hover:text-teal-400"
-                            >
-                              <Pencil size={15} />
-                            </button>
-
-                            <button
-                              onClick={() => handleDelete(vendor)}
-                              title="Delete vendor"
-                              className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-red-500/50 hover:text-red-400"
-                            >
-                              <Trash2 size={15} />
-                            </button>
-                          </>
-                        )}
+                        <button
+                          onClick={() => openEditModal(vendor)}
+                          title="Edit vendor"
+                          className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-teal-500/50 hover:text-teal-400"
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(vendor)}
+                          title="Delete vendor"
+                          className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-red-500/50 hover:text-red-400"
+                        >
+                          <Trash2 size={15} />
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -593,8 +574,7 @@ const Vendors = () => {
                 </select>
               </div>
 
-              {capabilities.view_vendor_bank_details && (
-                <fieldset className="space-y-4 rounded-xl border border-slate-700 p-4">
+              <fieldset className="space-y-4 rounded-xl border border-slate-700 p-4">
                   <legend className="px-2 text-sm font-semibold text-slate-200">
                     Bank details
                   </legend>
@@ -606,7 +586,6 @@ const Vendors = () => {
                       name="bank_account_name"
                       value={form.bank_account_name}
                       onChange={handleChange}
-                      disabled={!capabilities.manage_vendor_bank_details}
                       autoComplete="off"
                       className="vendor-form-input w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none disabled:opacity-70"
                     />
@@ -619,7 +598,6 @@ const Vendors = () => {
                       name="bank_account_number"
                       value={form.bank_account_number}
                       onChange={handleChange}
-                      disabled={!capabilities.manage_vendor_bank_details}
                       autoComplete="off"
                       inputMode="numeric"
                       className="vendor-form-input w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none disabled:opacity-70"
@@ -633,14 +611,12 @@ const Vendors = () => {
                       name="bank_ifsc"
                       value={form.bank_ifsc}
                       onChange={handleChange}
-                      disabled={!capabilities.manage_vendor_bank_details}
                       autoComplete="off"
                       maxLength={11}
                       className="vendor-form-input w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none disabled:opacity-70"
                     />
                   </div>
-                </fieldset>
-              )}
+              </fieldset>
 
               <div className="flex justify-end gap-3 border-t border-slate-800 pt-5">
                 <button

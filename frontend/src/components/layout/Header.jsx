@@ -1,18 +1,10 @@
 
-import { useEffect, useState } from "react";
 import { Menu, Search, Bell, ChevronDown, LogOut } from "lucide-react";
 import authService from "../../services/authService";
+import useAuth from "../../hooks/useAuth";
 
 function Header({ onMenuClick }) {
-  const [user, setUser] = useState(null);
-
-  useEffect(() => {
-    authService.getCurrentUser()
-      .then(setUser)
-      .catch((error) => {
-        console.error("Unable to load current user:", error);
-      });
-  }, []);
+  const { user } = useAuth();
 
   const signOut = async () => {
     try {

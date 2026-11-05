@@ -43,9 +43,10 @@ The system enables users to upload invoices, extract invoice information using O
 
 ### 4. Authentication and Authorization
 - User registration and login.
-- Token-based authentication.
-- Protected API endpoints.
+- DRF token-based authentication. Login identifies the user and issues a token; `/api/auth/me/` returns identity only.
+- Protected API endpoints require authentication. Every authenticated user can use the available application modules; Django Groups are not used to authorize application access.
 - Authenticated frontend requests.
+- Registration never assigns an application role. Existing Django groups and historical approval-rule labels may remain in the database but are unused for access control.
 
 ### 5. Dashboard and Analytics
 - Centralized invoice overview.

@@ -428,7 +428,7 @@ class ApprovalRule(models.Model):
         ]
 
     def __str__(self):
-        return f"Level {self.approval_level}: {self.role}"
+        return f"Approval level {self.approval_level}"
 
 
 class VendorOnboardingHistory(models.Model):

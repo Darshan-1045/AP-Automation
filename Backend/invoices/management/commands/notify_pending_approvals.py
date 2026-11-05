@@ -4,11 +4,9 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Q
 from django.utils import timezone
 
 from invoices.models import (
-    ApprovalRule,
     AuditEvent,
     Invoice,
     InvoiceApprovalHistory,
@@ -28,7 +26,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         reminder_hours = int(getattr(settings, "AP_APPROVAL_REMINDER_HOURS", 24))
         escalation_hours = int(getattr(settings, "AP_APPROVAL_ESCALATION_HOURS", 72))
-        escalation_role = getattr(settings, "AP_APPROVAL_ESCALATION_ROLE", "AP Manager")
         if reminder_hours <= 0 or escalation_hours <= reminder_hours:
             raise CommandError(
                 "Approval escalation hours must be greater than positive reminder hours."
@@ -66,20 +63,15 @@ class Command(BaseCommand):
             if not is_escalation and not reminder_due:
                 continue
 
-            recipient_role = (
-                escalation_role if is_escalation else self._next_approval_role(invoice)
-            )
             recipients = list(
                 get_user_model().objects.filter(
                     is_active=True,
-                    groups__name=recipient_role,
                 ).exclude(email="").values_list("email", flat=True).distinct()
             )
             if not recipients:
                 skipped += 1
                 self.stderr.write(
-                    f"Invoice {invoice.pk}: no active email recipients for "
-                    f"approval role '{recipient_role}'."
+                    f"Invoice {invoice.pk}: no active users have an email address."
                 )
                 continue
 
@@ -114,7 +106,7 @@ class Command(BaseCommand):
                 InvoiceApprovalHistory.objects.create(
                     invoice=invoice,
                     action=InvoiceApprovalHistory.Action.ESCALATED,
-                    remarks=f"Automatically escalated to {recipient_role}.",
+                    remarks="Automatically escalated due to age.",
                     actor_username="system",
                     approval_level=invoice.approval_level,
                 )
@@ -125,7 +117,6 @@ class Command(BaseCommand):
                     entity_id=str(invoice.pk),
                     details={
                         "approval_level": invoice.approval_level,
-                        "escalation_role": recipient_role,
                         "recipient_count": sent,
                     },
                 )
@@ -138,7 +129,6 @@ class Command(BaseCommand):
                     entity_id=str(invoice.pk),
                     details={
                         "approval_level": invoice.approval_level,
-                        "recipient_role": recipient_role,
                         "recipient_count": sent,
                     },
                 )
@@ -150,17 +140,3 @@ class Command(BaseCommand):
                 f"{escalated} escalation(s), {skipped} skipped."
             )
         )
-
-    @staticmethod
-    def _next_approval_role(invoice):
-        amount = invoice.total_amount or 0
-        rules = ApprovalRule.objects.filter(
-            is_active=True,
-            minimum_amount__lte=amount,
-        ).filter(
-            Q(maximum_amount__isnull=True) | Q(maximum_amount__gte=amount)
-        ).order_by("approval_level")
-        rule = rules.filter(
-            approval_level__gt=invoice.approval_level
-        ).first()
-        return rule.role if rule else "Approver"

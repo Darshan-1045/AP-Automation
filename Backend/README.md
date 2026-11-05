@@ -33,10 +33,10 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
   Django's console email backend.
 - `python manage.py notify_pending_approvals` sends reminders after
   `AP_APPROVAL_REMINDER_HOURS` (default 24) and escalates after
-  `AP_APPROVAL_ESCALATION_HOURS` (default 72) to the group named by
-  `AP_APPROVAL_ESCALATION_ROLE` (default `AP Manager`). Schedule this command
-  with the deployment's task scheduler. Approver identities are selected from
-  the configured Django groups; no approver emails are created automatically.
+  `AP_APPROVAL_ESCALATION_HOURS` (default 72). Notifications go to active users
+  with email addresses; Django groups and approval-rule labels do not restrict
+  application access or notification recipients. Schedule this command with
+  the deployment's task scheduler.
 
 ## Integration status
 

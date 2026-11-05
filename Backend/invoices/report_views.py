@@ -12,7 +12,6 @@ from rest_framework.views import APIView
 
 from .audit import record_audit_event
 from .models import AuditEvent, Invoice, InvoiceMatchingResult, Payment
-from .permissions import IsAdminOrAPManager
 
 
 class ReportContentNegotiation(DefaultContentNegotiation):
@@ -24,11 +23,6 @@ class ReportContentNegotiation(DefaultContentNegotiation):
 
 class ReportAPIView(APIView):
     content_negotiation_class = ReportContentNegotiation
-
-    def get_permissions(self):
-        if self.request.query_params.get("type") == "audit":
-            return [IsAdminOrAPManager()]
-        return super().get_permissions()
 
     report_types = {
         "aging",

@@ -30,12 +30,6 @@ from .ocr_service import extract_invoice_text
 from .ai_extraction_service import extract_invoice_data
 from .invoice_validation_service import validate_invoice_data
 from .vendor_validation_service import validate_vendor_data
-from .permissions import (
-    CanApproveInvoices,
-    CanProcessPayments,
-    CanRequestPayments,
-    IsAdminOrAPManager,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +51,9 @@ def _approval_rules_for(invoice):
             minimum_amount__lte=amount,
         ).filter(
             Q(maximum_amount__isnull=True) | Q(maximum_amount__gte=amount)
-        ).order_by("approval_level").values("role", "approval_level")
+        ).order_by("approval_level").values("approval_level")
     )
-    return rules or [{"role": "Approver", "approval_level": 1}]
-
-
-def _user_can_fill_approval_role(user, role):
-    return user.is_superuser or user.groups.filter(name=role).exists()
+    return rules or [{"approval_level": 1}]
 
 
 def safe_decimal(value):
@@ -95,7 +85,6 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = InvoiceSerializer
 
     parser_classes = [MultiPartParser, FormParser]
-
     def perform_create(self, serializer):
 
         # 1. Save the original document first.
@@ -510,7 +499,6 @@ class InvoiceDetailAPIView(generics.RetrieveUpdateAPIView):
 class InvoiceApprovalActionAPIView(APIView):
 
     action = None
-    permission_classes = [CanApproveInvoices]
 
     @transaction.atomic
     def post(self, request, pk):
@@ -564,16 +552,6 @@ class InvoiceApprovalActionAPIView(APIView):
                     {"error": "The invoice has already completed all approval levels."},
                     status=http_status.HTTP_400_BAD_REQUEST,
                 )
-            if not _user_can_fill_approval_role(request.user, next_rule["role"]):
-                return Response(
-                    {
-                        "error": "The user's role is not authorized for this approval level.",
-                        "required_role": next_rule["role"],
-                        "approval_level": next_rule["approval_level"],
-                    },
-                    status=http_status.HTTP_403_FORBIDDEN,
-                )
-
             remarks = request.data.get("remarks", "")
             if remarks is None:
                 remarks = ""
@@ -657,7 +635,6 @@ class InvoiceApprovalActionAPIView(APIView):
                         "actor_username": history.actor_username,
                         "created_at": history.created_at,
                     },
-                    "next_approval_role": following_rule["role"] if following_rule else None,
                 },
                 status=http_status.HTTP_200_OK,
             )
@@ -760,8 +737,6 @@ class RejectInvoiceAPIView(InvoiceApprovalActionAPIView):
 
 
 class MarkInvoicePaidAPIView(APIView):
-    permission_classes = [CanProcessPayments]
-
     @transaction.atomic
     def post(self, request, pk):
         invoice = get_object_or_404(
@@ -895,11 +870,6 @@ class VendorListCreateAPIView(generics.ListCreateAPIView):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
 
-    def get_permissions(self):
-        if self.request.method == "POST":
-            return [IsAdminOrAPManager()]
-        return super().get_permissions()
-
     def perform_create(self, serializer):
         vendor = serializer.save()
         VendorOnboardingHistory.objects.create(
@@ -920,11 +890,6 @@ class VendorListCreateAPIView(generics.ListCreateAPIView):
 class VendorDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
-
-    def get_permissions(self):
-        if self.request.method in {"PATCH", "PUT", "DELETE"}:
-            return [IsAdminOrAPManager()]
-        return super().get_permissions()
 
     def perform_update(self, serializer):
         existing = self.get_object()
@@ -957,6 +922,13 @@ class VendorDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         )
 
     def perform_destroy(self, instance):
+        if (
+            instance.purchase_orders.exists()
+            or Invoice.objects.filter(vendor_name__iexact=instance.vendor_name).exists()
+        ):
+            raise ValidationError(
+                "Vendors referenced by invoices or purchase orders cannot be deleted."
+            )
         record_audit_event(
             self.request,
             "vendor.deleted",
@@ -969,7 +941,6 @@ class VendorDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 class PaymentListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = PaymentSerializer
     queryset = Payment.objects.select_related("invoice").all()
-    permission_classes = [CanRequestPayments]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1038,8 +1009,6 @@ class PaymentListCreateAPIView(generics.ListCreateAPIView):
 
 
 class PaymentActionAPIView(APIView):
-    permission_classes = [CanProcessPayments]
-
     @transaction.atomic
     def post(self, request, pk):
         payment = get_object_or_404(
@@ -1138,8 +1107,6 @@ class PaymentActionAPIView(APIView):
 
 
 class PaymentAdviceAPIView(APIView):
-    permission_classes = [CanRequestPayments]
-
     def get(self, request, pk):
         payment = get_object_or_404(
             Payment.objects.select_related("invoice"),

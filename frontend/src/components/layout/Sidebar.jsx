@@ -87,7 +87,8 @@ function Sidebar({ isOpen, onClose }) {
 
         {/* Navigation */}
         <nav className="flex-1 space-y-7 overflow-y-auto px-4 py-7">
-          {navigation.map((group) => (
+          {navigation.map((group) => {
+            return (
             <div key={group.title}>
               <p className="mb-3 px-3 text-[11px] font-semibold tracking-[1.5px] text-slate-500">
                 {group.title}
@@ -118,7 +119,8 @@ function Sidebar({ isOpen, onClose }) {
                 })}
               </div>
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         {/* Footer */}

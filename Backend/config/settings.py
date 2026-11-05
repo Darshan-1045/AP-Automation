@@ -302,12 +302,6 @@ AP_APPROVAL_ESCALATION_HOURS = int(
     os.getenv("AP_APPROVAL_ESCALATION_HOURS", "72")
 )
 
-AP_APPROVAL_ESCALATION_ROLE = os.getenv(
-    "AP_APPROVAL_ESCALATION_ROLE",
-    "AP Manager",
-)
-
-
 # ============================================================
 # MEDIA CONFIGURATION
 # ============================================================
