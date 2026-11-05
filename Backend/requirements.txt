@@ -1,6 +1,6 @@
 
 # Django Framework
-Django>=5.2,<6.1
+Django>=6.1,<6.2
 djangorestframework>=3.16,<4.0
 django-cors-headers>=4.7,<5.0
 
