@@ -32,24 +32,40 @@ const formatDate = (value) => {
   });
 };
 
-const getToday = () => {
-  const today = new Date();
-  const offset = today.getTimezoneOffset();
-
-  return new Date(today.getTime() - offset * 60000)
-    .toISOString()
-    .split("T")[0];
+const getOutstandingAmount = (invoice, payments) => {
+  const paidAmount = payments
+    .filter(
+      (payment) =>
+        Number(payment.invoice) === Number(invoice.id) &&
+        payment.status === "PAID"
+    )
+    .reduce((total, payment) => total + Number(payment.amount || 0), 0);
+  return Math.max(Number(invoice.total_amount || 0) - paidAmount, 0);
 };
 
-const getOutstandingAmount = (invoice, payments) => {
+const getAvailablePaymentAmount = (invoice, payments) => {
   const reservedAmount = payments
     .filter(
       (payment) =>
         Number(payment.invoice) === Number(invoice.id) &&
-        ["PAID", "PENDING", "APPROVED", "PROCESSING"].includes(payment.status)
+        ["PENDING", "APPROVED", "PROCESSING"].includes(payment.status)
     )
     .reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  return Math.max(Number(invoice.total_amount || 0) - reservedAmount, 0);
+  return Math.max(getOutstandingAmount(invoice, payments) - reservedAmount, 0);
+};
+
+const getApiError = (err, fallback) => {
+  const responseData = err.response?.data;
+  const validationMessage = responseData
+    ? Object.values(responseData).flat().find((value) => typeof value === "string")
+    : "";
+  return (
+    responseData?.error ||
+    responseData?.detail ||
+    validationMessage ||
+    err.message ||
+    fallback
+  );
 };
 
 const Payments = () => {
@@ -59,12 +75,12 @@ const Payments = () => {
   const [paymentsLoading, setPaymentsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedInvoice, setSelectedInvoice] = useState(null);
-  const [selectedPayment, setSelectedPayment] = useState(null);
+  const [paymentAction, setPaymentAction] = useState(null);
+  const [transitionReason, setTransitionReason] = useState("");
+  const [transitionSubmitting, setTransitionSubmitting] = useState(false);
   const [paymentAdvice, setPaymentAdvice] = useState(null);
   const [loadingAdvice, setLoadingAdvice] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState("");
-  const [paymentDate, setPaymentDate] = useState(getToday());
-  const [paymentReference, setPaymentReference] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("BANK_TRANSFER");
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -101,10 +117,27 @@ const Payments = () => {
     [invoices, payments]
   );
 
-  const paidInvoices = useMemo(
-    () => invoices.filter((invoice) => invoice.status === "PAID"),
-    [invoices]
+  const paidPaymentRecords = payments.filter((payment) => payment.status === "PAID");
+  const legacyPaidInvoices = invoices.filter(
+    (invoice) =>
+      invoice.status === "PAID" &&
+      !paidPaymentRecords.some(
+        (payment) => Number(payment.invoice) === Number(invoice.id)
+      )
   );
+  const paymentHistory = [
+    ...paidPaymentRecords.map((payment) => ({
+      ...payment,
+      key: `payment-${payment.id}`,
+    })),
+    ...legacyPaidInvoices.map((invoice) => ({
+      ...invoice,
+      key: `invoice-${invoice.id}`,
+      amount: invoice.total_amount,
+      status: invoice.status,
+      legacy: true,
+    })),
+  ];
 
   const filterInvoices = (items) => {
     const query = search.toLowerCase().trim();
@@ -118,22 +151,22 @@ const Payments = () => {
   };
 
   const filteredApproved = filterInvoices(approvedInvoices);
-  const filteredPaid = filterInvoices(paidInvoices);
+  const filteredPaid = paymentHistory.filter(
+    (payment) =>
+      !search.trim() ||
+      payment.invoice_number?.toLowerCase().includes(search.toLowerCase().trim()) ||
+      payment.vendor_name?.toLowerCase().includes(search.toLowerCase().trim())
+  );
 
-  const recordedPaidAmount = payments
-    .filter((payment) => payment.status === "PAID")
+  const recordedPaidAmount = paidPaymentRecords
     .reduce((total, payment) => total + Number(payment.amount || 0), 0);
-  const legacyPaidAmount = paidInvoices
-    .filter(
-      (invoice) =>
-        !payments.some(
-          (payment) =>
-            Number(payment.invoice) === Number(invoice.id) &&
-            payment.status === "PAID"
-        )
-    )
+  const legacyPaidAmount = legacyPaidInvoices
     .reduce((total, invoice) => total + Number(invoice.total_amount || 0), 0);
   const paidAmount = recordedPaidAmount + legacyPaidAmount;
+  const paidInvoiceCount = new Set([
+    ...paidPaymentRecords.map((payment) => Number(payment.invoice)),
+    ...legacyPaidInvoices.map((invoice) => Number(invoice.id)),
+  ]).size;
 
   const pendingAmount = approvedInvoices.reduce(
     (total, invoice) => total + getOutstandingAmount(invoice, payments),
@@ -142,10 +175,7 @@ const Payments = () => {
 
   const openPaymentForm = (invoice) => {
     setSelectedInvoice(invoice);
-    setSelectedPayment(null);
-    setPaymentAmount(String(getOutstandingAmount(invoice, payments)));
-    setPaymentDate(getToday());
-    setPaymentReference("");
+    setPaymentAmount(String(getAvailablePaymentAmount(invoice, payments)));
     setPaymentMethod("BANK_TRANSFER");
     setActionError("");
     setSuccessMessage("");
@@ -155,42 +185,11 @@ const Payments = () => {
     if (submitting) return;
 
     setSelectedInvoice(null);
-    setSelectedPayment(null);
     setActionError("");
   };
 
   const handlePayment = async (event) => {
     event.preventDefault();
-
-    if (selectedPayment) {
-      if (!paymentDate || !paymentReference.trim()) {
-        setActionError("Payment date and transaction reference are required.");
-        return;
-      }
-
-      try {
-        setSubmitting(true);
-        setActionError("");
-        await paymentService.updatePaymentStatus(selectedPayment.id, {
-          status: "PAID",
-          payment_date: paymentDate,
-          payment_reference: paymentReference.trim(),
-        });
-        setSuccessMessage("Settlement recorded successfully.");
-        setSelectedPayment(null);
-        await Promise.all([refreshInvoices(), refreshPayments()]);
-      } catch (err) {
-        setActionError(
-          err.response?.data?.error ||
-            err.response?.data?.detail ||
-            err.message ||
-            "Unable to record settlement."
-        );
-      } finally {
-        setSubmitting(false);
-      }
-      return;
-    }
 
     if (!selectedInvoice) return;
 
@@ -218,41 +217,57 @@ const Payments = () => {
       await Promise.all([refreshInvoices(), refreshPayments()]);
     } catch (err) {
       console.error("Payment failed:", err);
-
-      setActionError(
-        err.response?.data?.error ||
-          err.response?.data?.detail ||
-          err.message ||
-          "Unable to record payment."
-      );
+      setActionError(getApiError(err, "Unable to record payment."));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handlePaymentTransition = async (payment, status) => {
-    if (status === "PAID") {
-      setSelectedPayment(payment);
-      setSelectedInvoice(null);
-      setPaymentDate(getToday());
-      setPaymentReference("");
-      setActionError("");
-      setSuccessMessage("");
+  const openPaymentAction = (payment, status) => {
+    setPaymentAction({ payment, status });
+    setTransitionReason("");
+    setActionError("");
+    setSuccessMessage("");
+  };
+
+  const handlePaymentTransition = async () => {
+    if (!paymentAction) return;
+    const { payment, status } = paymentAction;
+    if (["REJECTED", "FAILED"].includes(status) && !transitionReason.trim()) {
+      setActionError(
+        status === "REJECTED"
+          ? "A rejection reason is required."
+          : "A failure reason is required."
+      );
       return;
     }
-
     try {
+      setTransitionSubmitting(true);
       setActionError("");
-      await paymentService.updatePaymentStatus(payment.id, { status });
-      setSuccessMessage(`Payment request moved to ${status.toLowerCase()}.`);
-      await refreshPayments();
-    } catch (err) {
-      setActionError(
-        err.response?.data?.error ||
-          err.response?.data?.detail ||
-          err.message ||
-          "Unable to update payment status."
+      const body = { status };
+      if (status === "REJECTED") body.rejection_reason = transitionReason.trim();
+      if (status === "FAILED") body.failure_reason = transitionReason.trim();
+      const updatedPayment = await paymentService.updatePaymentStatus(
+        payment.id,
+        body
       );
+      setPaymentAction(null);
+      setSuccessMessage(
+        status === "PAID"
+          ? `Simulated payment completed. Reference: ${updatedPayment.payment_reference}.`
+          : status === "FAILED"
+            ? "Simulated payment marked as failed."
+            : status === "REJECTED"
+              ? "Payment request rejected."
+              : status === "PROCESSING"
+                ? "Simulated payment processing started."
+                : "Payment request approved."
+      );
+      await Promise.all([refreshInvoices(), refreshPayments()]);
+    } catch (err) {
+      setActionError(getApiError(err, "Unable to update payment status."));
+    } finally {
+      setTransitionSubmitting(false);
     }
   };
 
@@ -275,9 +290,10 @@ const Payments = () => {
   const filteredPayments = payments.filter((payment) => {
     const query = search.toLowerCase().trim();
     return (
-      !query ||
-      payment.invoice_number?.toLowerCase().includes(query) ||
-      payment.vendor_name?.toLowerCase().includes(query)
+      payment.status !== "PAID" &&
+      (!query ||
+        payment.invoice_number?.toLowerCase().includes(query) ||
+        payment.vendor_name?.toLowerCase().includes(query))
     );
   });
 
@@ -292,7 +308,7 @@ const Payments = () => {
     },
     {
       title: "Paid Invoices",
-      value: paidInvoices.length,
+      value: paidInvoiceCount,
       amount: paidAmount,
       icon: CheckCircle2,
       color: "text-emerald-600",
@@ -396,7 +412,7 @@ const Payments = () => {
         </div>
       )}
 
-      {actionError && !selectedInvoice && (
+      {actionError && !selectedInvoice && !paymentAction && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {actionError}
         </div>
@@ -523,12 +539,18 @@ const Payments = () => {
                           <StatusBadge status={invoice.status} />
                         </td>
                         <td className="whitespace-nowrap px-5 py-4">
-                          <button
-                            onClick={() => openPaymentForm(invoice)}
-                            className="rounded-lg bg-teal-600 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-700"
-                          >
-                            Request Payment
-                          </button>
+                          {getAvailablePaymentAmount(invoice, payments) > 0 ? (
+                            <button
+                              onClick={() => openPaymentForm(invoice)}
+                              className="rounded-lg bg-teal-600 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-700"
+                            >
+                              Request Payment
+                            </button>
+                          ) : (
+                            <span className="text-xs font-medium text-slate-500">
+                              Payment request active
+                            </span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -544,7 +566,7 @@ const Payments = () => {
                 Payment Requests
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Requests follow approval and processing steps before settlement is recorded.
+                Payment request approval is separate from invoice approval. Processing is simulated; no bank transfer is initiated.
               </p>
             </div>
 
@@ -565,7 +587,7 @@ const Payments = () => {
                       <th className="px-5 py-3">Vendor</th>
                       <th className="px-5 py-3">Amount</th>
                       <th className="px-5 py-3">Status</th>
-                      <th className="px-5 py-3">Reference</th>
+                      <th className="px-5 py-3">Reference / Reason</th>
                       <th className="px-5 py-3">Action</th>
                     </tr>
                   </thead>
@@ -585,41 +607,48 @@ const Payments = () => {
                           <StatusBadge status={payment.status} />
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                          {payment.payment_reference || "—"}
+                          {payment.rejection_reason || payment.payment_reference || "—"}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4">
                           {payment.status === "PENDING" && (
-                            <button
-                              onClick={() => handlePaymentTransition(payment, "APPROVED")}
-                              className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
-                            >
-                              Approve
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => openPaymentAction(payment, "APPROVED")}
+                                className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => openPaymentAction(payment, "REJECTED")}
+                                className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                              >
+                                Reject
+                              </button>
+                            </div>
                           )}
                           {payment.status === "APPROVED" && (
                             <button
-                              onClick={() => handlePaymentTransition(payment, "PROCESSING")}
+                              onClick={() => openPaymentAction(payment, "PROCESSING")}
                               className="rounded-lg bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
                             >
-                              Start processing
+                              Process Payment
                             </button>
                           )}
                           {payment.status === "PROCESSING" && (
-                            <button
-                              onClick={() => handlePaymentTransition(payment, "PAID")}
-                              className="rounded-lg bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-700 hover:bg-teal-100"
-                            >
-                              Record settlement
-                            </button>
-                          )}
-                          {payment.status === "PAID" && (
-                            <button
-                              onClick={() => openPaymentAdvice(payment)}
-                              disabled={loadingAdvice}
-                              className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:opacity-50"
-                            >
-                              {loadingAdvice ? "Loading..." : "Payment advice"}
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => openPaymentAction(payment, "PAID")}
+                                className="rounded-lg bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-700 hover:bg-teal-100"
+                              >
+                                Completed
+                              </button>
+                              <button
+                                onClick={() => openPaymentAction(payment, "FAILED")}
+                                className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                              >
+                                Failed
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -637,7 +666,7 @@ const Payments = () => {
                 Payment History
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Previously paid invoices and their transaction details.
+                Completed payment records with simulated or recorded settlement details.
               </p>
             </div>
 
@@ -657,32 +686,44 @@ const Payments = () => {
                       <th className="px-5 py-3">Method</th>
                       <th className="px-5 py-3">Amount</th>
                       <th className="px-5 py-3">Status</th>
+                      <th className="px-5 py-3">Action</th>
                     </tr>
                   </thead>
 
                   <tbody className="divide-y divide-slate-100">
-                    {filteredPaid.map((invoice) => (
-                      <tr key={invoice.id} className="hover:bg-slate-50">
+                    {filteredPaid.map((payment) => (
+                      <tr key={payment.key} className="hover:bg-slate-50">
                         <td className="whitespace-nowrap px-5 py-4 font-medium text-slate-900">
-                          {invoice.invoice_number || `#${invoice.id}`}
+                          {payment.invoice_number || `#${payment.invoice || payment.id}`}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                          {invoice.vendor_name || "—"}
+                          {payment.vendor_name || "—"}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                          {formatDate(invoice.payment_date)}
+                          {formatDate(payment.payment_date)}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                          {invoice.payment_reference || "—"}
+                          {payment.payment_reference || "—"}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 text-slate-600">
-                          {invoice.payment_method?.replaceAll("_", " ") || "—"}
+                          {payment.payment_method?.replaceAll("_", " ") || "—"}
                         </td>
                         <td className="whitespace-nowrap px-5 py-4 font-semibold text-slate-900">
-                          {formatCurrency(invoice.total_amount, invoice.currency)}
+                          {formatCurrency(payment.amount, payment.currency)}
                         </td>
                         <td className="px-5 py-4">
-                          <StatusBadge status={invoice.status} />
+                          <StatusBadge status={payment.status} />
+                        </td>
+                        <td className="whitespace-nowrap px-5 py-4">
+                          {!payment.legacy && (
+                            <button
+                              onClick={() => openPaymentAdvice(payment)}
+                              disabled={loadingAdvice}
+                              className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200 disabled:opacity-50"
+                            >
+                              {loadingAdvice ? "Loading..." : "Payment advice"}
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -695,18 +736,16 @@ const Payments = () => {
       )}
 
       {/* Payment modal */}
-      {(selectedInvoice || selectedPayment) && (
+      {selectedInvoice && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-100 p-5">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  {selectedPayment ? "Record Settlement" : "Request Payment"}
+                  Request Payment
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  {selectedPayment
-                    ? selectedPayment.invoice_number || `Invoice #${selectedPayment.invoice}`
-                    : selectedInvoice.invoice_number || `Invoice #${selectedInvoice.id}`}
+                  {selectedInvoice.invoice_number || `Invoice #${selectedInvoice.id}`}
                 </p>
               </div>
 
@@ -724,12 +763,12 @@ const Payments = () => {
                 <p className="text-xs text-slate-500">Payment amount</p>
                 <p className="mt-1 text-xl font-bold text-slate-900">
                   {formatCurrency(
-                    selectedPayment?.amount || selectedInvoice?.total_amount,
-                    selectedInvoice?.currency
+                    paymentAmount,
+                    selectedInvoice.currency
                   )}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
-                  {selectedPayment?.vendor_name || selectedInvoice?.vendor_name}
+                  {selectedInvoice.vendor_name}
                 </p>
               </div>
 
@@ -739,7 +778,6 @@ const Payments = () => {
                 </div>
               )}
 
-              {!selectedPayment && (
               <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">
                   Request amount
@@ -750,7 +788,7 @@ const Payments = () => {
                   step="0.01"
                   max={
                     selectedInvoice
-                      ? getOutstandingAmount(selectedInvoice, payments)
+                      ? getAvailablePaymentAmount(selectedInvoice, payments)
                       : undefined
                   }
                   value={paymentAmount}
@@ -759,38 +797,7 @@ const Payments = () => {
                   className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500"
                 />
               </div>
-              )}
-
-              {selectedPayment && <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                  Payment Date
-                </label>
-                <input
-                  type="date"
-                  value={paymentDate}
-                  onChange={(event) => setPaymentDate(event.target.value)}
-                  max={getToday()}
-                  required
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500"
-                />
-              </div>}
-
-              {selectedPayment && <div>
-                <label className="mb-1.5 block text-sm font-medium text-slate-700">
-                  Transaction Reference
-                </label>
-                <input
-                  type="text"
-                  value={paymentReference}
-                  onChange={(event) => setPaymentReference(event.target.value)}
-                  placeholder="Enter UTR / transaction ID"
-                  maxLength={150}
-                  required
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-teal-500"
-                />
-              </div>}
-
-              {!selectedPayment && <div>
+              <div>
                 <label className="mb-1.5 block text-sm font-medium text-slate-700">
                   Payment Method
                 </label>
@@ -806,7 +813,7 @@ const Payments = () => {
                   <option value="CASH">Cash</option>
                   <option value="OTHER">Other</option>
                 </select>
-              </div>}
+              </div>
 
               <div className="flex justify-end gap-3 border-t border-slate-100 pt-4">
                 <button
@@ -825,13 +832,91 @@ const Payments = () => {
                 >
                   {submitting
                     ? "Processing..."
-                    : selectedPayment
-                      ? "Confirm Settlement"
-                      : "Create Payment Request"}
+                    : "Create Payment Request"}
                 </button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {paymentAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <section className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-slate-900">
+              {paymentAction.status === "APPROVED"
+                ? "Approve payment request?"
+                : paymentAction.status === "REJECTED"
+                  ? "Reject payment request?"
+                  : paymentAction.status === "PROCESSING"
+                    ? "Start simulated payment?"
+                    : paymentAction.status === "PAID"
+                      ? "Complete simulated payment?"
+                      : "Mark simulated payment failed?"}
+            </h2>
+            <p className="mt-2 text-sm text-slate-600">
+              {paymentAction.payment.invoice_number} ·{" "}
+              {formatCurrency(
+                paymentAction.payment.amount,
+                paymentAction.payment.currency
+              )}
+            </p>
+            <p className="mt-2 text-sm text-slate-500">
+              {paymentAction.status === "PAID"
+                ? "This records a test completion and generates a simulated reference. No bank transfer will occur."
+                : paymentAction.status === "PROCESSING"
+                  ? "This starts a simulated payment only. No bank transfer will occur."
+                  : paymentAction.status === "REJECTED"
+                    ? "Provide a reason; the payment request will be rejected without changing invoice approval."
+                    : paymentAction.status === "FAILED"
+                      ? "Provide a reason for the simulated payment failure."
+                      : paymentAction.status === "APPROVED"
+                        ? "This approves the payment request, not the invoice."
+                        : "Confirm this payment request action."}
+            </p>
+            {["REJECTED", "FAILED"].includes(paymentAction.status) && (
+              <label className="mt-4 block text-sm font-medium text-slate-700">
+                {paymentAction.status === "REJECTED"
+                  ? "Rejection reason"
+                  : "Failure reason"}
+                <textarea
+                  value={transitionReason}
+                  onChange={(event) => setTransitionReason(event.target.value)}
+                  rows={3}
+                  maxLength={1000}
+                  className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-500"
+                  required
+                />
+              </label>
+            )}
+            {actionError && (
+              <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {actionError}
+              </div>
+            )}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setPaymentAction(null)}
+                disabled={transitionSubmitting}
+                className="rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handlePaymentTransition}
+                disabled={
+                  transitionSubmitting ||
+                  (["REJECTED", "FAILED"].includes(paymentAction.status) &&
+                    !transitionReason.trim())
+                }
+                className="rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {transitionSubmitting ? "Saving..." : "Confirm"}
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>

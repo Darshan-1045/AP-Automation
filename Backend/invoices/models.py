@@ -454,6 +454,7 @@ class Payment(models.Model):
         PROCESSING = "PROCESSING", "Processing"
         PAID = "PAID", "Paid"
         FAILED = "FAILED", "Failed"
+        REJECTED = "REJECTED", "Rejected"
         CANCELLED = "CANCELLED", "Cancelled"
 
     invoice = models.ForeignKey(
@@ -473,6 +474,7 @@ class Payment(models.Model):
     )
     payment_reference = models.CharField(max_length=150, blank=True, default="")
     payment_date = models.DateField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
     created_by = models.CharField(max_length=150, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

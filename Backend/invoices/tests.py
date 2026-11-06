@@ -951,6 +951,251 @@ class PaymentRequestTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Payment.objects.filter(invoice=self.invoice).count(), 1)
 
+    def test_duplicate_active_payment_request_is_rejected(self):
+        client = authenticated_client("payment-request-user")
+        payload = {
+            "invoice": self.invoice.pk,
+            "amount": "50.00",
+            "payment_method": Invoice.PaymentMethod.BANK_TRANSFER,
+        }
+
+        first_response = client.post(
+            "/api/invoices/payments/",
+            payload,
+            format="json",
+        )
+        duplicate_response = client.post(
+            "/api/invoices/payments/",
+            payload,
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, 201, first_response.data)
+        self.assertEqual(duplicate_response.status_code, 400, duplicate_response.data)
+        self.assertEqual(Payment.objects.filter(invoice=self.invoice).count(), 1)
+
+    def test_rejection_requires_a_reason_and_records_the_actor(self):
+        client = authenticated_client("payment-reviewer")
+        created = client.post(
+            "/api/invoices/payments/",
+            {
+                "invoice": self.invoice.pk,
+                "amount": "50.00",
+                "payment_method": Invoice.PaymentMethod.BANK_TRANSFER,
+            },
+            format="json",
+        )
+        payment_id = created.data["id"]
+
+        missing_reason = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.REJECTED},
+            format="json",
+        )
+        self.assertEqual(missing_reason.status_code, 400, missing_reason.data)
+
+        rejected = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {
+                "status": Payment.Status.REJECTED,
+                "rejection_reason": "Invoice amount requires clarification.",
+            },
+            format="json",
+        )
+
+        self.assertEqual(rejected.status_code, 200, rejected.data)
+        self.assertEqual(rejected.data["status"], Payment.Status.REJECTED)
+        self.assertEqual(
+            rejected.data["rejection_reason"],
+            "Invoice amount requires clarification.",
+        )
+        event = AuditEvent.objects.get(
+            action="payment.status_changed",
+            entity_id=str(payment_id),
+        )
+        self.assertEqual(event.actor, "test-payment-reviewer")
+        self.assertEqual(event.details["previous_status"], Payment.Status.PENDING)
+        self.assertEqual(event.details["status"], Payment.Status.REJECTED)
+        self.assertEqual(
+            event.details["reason"],
+            "Invoice amount requires clarification.",
+        )
+        self.assertIsNotNone(event.created_at)
+
+    def test_ns_2026_0119_simulated_payment_workflow(self):
+        self.vendor.vendor_name = "Northstar Office Supplies"
+        self.vendor.save(update_fields=["vendor_name"])
+        invoice = self.invoice
+        invoice.invoice_number = "NS-2026-0119"
+        invoice.vendor_name = self.vendor.vendor_name
+        invoice.total_amount = "8525.50"
+        invoice.currency = "INR"
+        invoice.save(update_fields=[
+            "invoice_number",
+            "vendor_name",
+            "total_amount",
+            "currency",
+        ])
+        client = authenticated_client("payment-operator")
+        created = client.post(
+            "/api/invoices/payments/",
+            {
+                "invoice": invoice.pk,
+                "amount": "8525.50",
+                "payment_method": Invoice.PaymentMethod.BANK_TRANSFER,
+            },
+            format="json",
+        )
+
+        self.assertEqual(created.status_code, 201, created.data)
+        payment_id = created.data["id"]
+        self.assertEqual(created.data["status"], Payment.Status.PENDING)
+        self.assertEqual(created.data["invoice_number"], "NS-2026-0119")
+        self.assertEqual(created.data["vendor_name"], "Northstar Office Supplies")
+        self.assertEqual(created.data["amount"], "8525.50")
+
+        approved = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.APPROVED},
+            format="json",
+        )
+        self.assertEqual(approved.status_code, 200, approved.data)
+        self.assertEqual(approved.data["status"], Payment.Status.APPROVED)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, Invoice.Status.APPROVED)
+
+        processing = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.PROCESSING},
+            format="json",
+        )
+        self.assertEqual(processing.status_code, 200, processing.data)
+        self.assertEqual(processing.data["status"], Payment.Status.PROCESSING)
+        duplicate_processing = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.PROCESSING},
+            format="json",
+        )
+        self.assertEqual(duplicate_processing.status_code, 400)
+
+        completed = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.PAID},
+            format="json",
+        )
+        self.assertEqual(completed.status_code, 200, completed.data)
+        self.assertEqual(completed.data["status"], Payment.Status.PAID)
+        self.assertEqual(completed.data["amount"], "8525.50")
+        self.assertTrue(completed.data["payment_reference"].startswith("SIM-PAY-"))
+        self.assertEqual(completed.data["payment_date"], timezone.localdate().isoformat())
+        self.assertEqual(
+            Payment.objects.filter(invoice=invoice, status=Payment.Status.PAID).count(),
+            1,
+        )
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, Invoice.Status.PAID)
+        self.assertEqual(invoice.payment_reference, completed.data["payment_reference"])
+
+        duplicate_completion = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.PAID},
+            format="json",
+        )
+        self.assertEqual(duplicate_completion.status_code, 400)
+
+        events = AuditEvent.objects.filter(
+            action="payment.status_changed",
+            entity_id=str(payment_id),
+        ).order_by("created_at", "id")
+        self.assertEqual(events.count(), 3)
+        self.assertEqual(
+            list(events.values_list("actor", flat=True)),
+            ["test-payment-operator"] * 3,
+        )
+        self.assertEqual(
+            list(events.values_list("details__status", flat=True)),
+            [
+                Payment.Status.APPROVED,
+                Payment.Status.PROCESSING,
+                Payment.Status.PAID,
+            ],
+        )
+
+    def test_unvalidated_invoice_cannot_start_payment_processing(self):
+        client = authenticated_client("payment-operator")
+        payment = Payment.objects.create(
+            invoice=self.invoice,
+            amount="50.00",
+            status=Payment.Status.APPROVED,
+            payment_method=Invoice.PaymentMethod.BANK_TRANSFER,
+        )
+        Invoice.objects.filter(pk=self.invoice.pk).update(
+            validation_status="INVALID",
+            validation_errors=["Missing required field."],
+        )
+
+        response = client.post(
+            f"/api/invoices/payments/{payment.pk}/status/",
+            {"status": Payment.Status.PROCESSING},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.APPROVED)
+
+    def test_failed_simulated_payment_requires_and_audits_reason(self):
+        client = authenticated_client("payment-operator")
+        created = client.post(
+            "/api/invoices/payments/",
+            {
+                "invoice": self.invoice.pk,
+                "amount": "50.00",
+                "payment_method": Invoice.PaymentMethod.BANK_TRANSFER,
+            },
+            format="json",
+        )
+        payment_id = created.data["id"]
+        client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.APPROVED},
+            format="json",
+        )
+        client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.PROCESSING},
+            format="json",
+        )
+
+        missing_reason = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {"status": Payment.Status.FAILED},
+            format="json",
+        )
+        self.assertEqual(missing_reason.status_code, 400, missing_reason.data)
+
+        failed = client.post(
+            f"/api/invoices/payments/{payment_id}/status/",
+            {
+                "status": Payment.Status.FAILED,
+                "failure_reason": "Simulated processor declined the test payment.",
+            },
+            format="json",
+        )
+        self.assertEqual(failed.status_code, 200, failed.data)
+        self.assertEqual(failed.data["status"], Payment.Status.FAILED)
+        event = AuditEvent.objects.get(
+            action="payment.status_changed",
+            entity_id=str(payment_id),
+            details__status=Payment.Status.FAILED,
+        )
+        self.assertEqual(event.actor, "test-payment-operator")
+        self.assertEqual(
+            event.details["reason"],
+            "Simulated processor declined the test payment.",
+        )
+        self.assertIsNotNone(event.created_at)
+
 
 @override_settings(
     EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",

@@ -313,6 +313,7 @@ class VendorSerializer(serializers.ModelSerializer):
 class PaymentSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
     vendor_name = serializers.CharField(source="invoice.vendor_name", read_only=True)
+    currency = serializers.CharField(source="invoice.currency", read_only=True)
     outstanding_amount = serializers.SerializerMethodField()
 
     class Meta:
@@ -322,11 +323,13 @@ class PaymentSerializer(serializers.ModelSerializer):
             "invoice",
             "invoice_number",
             "vendor_name",
+            "currency",
             "amount",
             "status",
             "payment_method",
             "payment_reference",
             "payment_date",
+            "rejection_reason",
             "outstanding_amount",
             "created_by",
             "created_at",
@@ -336,9 +339,11 @@ class PaymentSerializer(serializers.ModelSerializer):
             "id",
             "invoice_number",
             "vendor_name",
+            "currency",
             "status",
             "payment_reference",
             "payment_date",
+            "rejection_reason",
             "outstanding_amount",
             "created_by",
             "created_at",

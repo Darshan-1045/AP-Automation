@@ -1,10 +1,12 @@
 import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from uuid import uuid4
 
 from django.http import FileResponse
 from django.db import transaction
 from django.db.models import Q, Sum
+from django.utils import timezone
 from rest_framework import generics
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -85,6 +87,33 @@ def safe_date(value):
         return date.fromisoformat(value)
     except (ValueError, TypeError):
         return None
+
+
+def _validate_invoice_for_payment(invoice):
+    if invoice.status != Invoice.Status.APPROVED:
+        raise ValidationError(
+            {"invoice": "Only approved invoices can have payment requests."}
+        )
+    if invoice.validation_status != "VALID" or invoice.validation_errors:
+        raise ValidationError(
+            {"invoice": "The invoice must pass validation before payment."}
+        )
+
+    vendor_validation = validate_vendor_data(
+        invoice.vendor_name,
+        invoice.vendor_gstin,
+    )
+    if vendor_validation["status"] != "VERIFIED":
+        raise ValidationError(
+            {"invoice": "The vendor must be approved and verified before payment."}
+        )
+
+    if invoice.po_number or invoice.matching_results.exists():
+        result = invoice.matching_results.filter(is_current=True).first()
+        if result is None or result.status != InvoiceMatchingResult.Status.MATCHED:
+            raise ValidationError(
+                {"invoice": "A current successful PO/GRN match is required."}
+            )
 
 
 class InvoiceListCreateAPIView(generics.ListCreateAPIView):
@@ -984,24 +1013,19 @@ class PaymentListCreateAPIView(generics.ListCreateAPIView):
         invoice = Invoice.objects.select_for_update().get(
             pk=serializer.validated_data["invoice"].pk
         )
-        if invoice.status != Invoice.Status.APPROVED:
-            raise serializers.ValidationError(
-                {"invoice": "Only approved invoices can have payment requests."}
+        _validate_invoice_for_payment(invoice)
+        amount = serializer.validated_data["amount"]
+        if invoice.payments.filter(
+            amount=amount,
+            status__in=[
+                Payment.Status.PENDING,
+                Payment.Status.APPROVED,
+                Payment.Status.PROCESSING,
+            ],
+        ).exists():
+            raise ValidationError(
+                {"amount": "An active payment request already exists for this amount."}
             )
-        vendor_validation = validate_vendor_data(
-            invoice.vendor_name,
-            invoice.vendor_gstin,
-        )
-        if vendor_validation["status"] != "VERIFIED":
-            raise serializers.ValidationError(
-                {"invoice": "The vendor must be approved and verified before payment."}
-            )
-        if invoice.po_number or invoice.matching_results.exists():
-            result = invoice.matching_results.filter(is_current=True).first()
-            if result is None or result.status != InvoiceMatchingResult.Status.MATCHED:
-                raise serializers.ValidationError(
-                    {"invoice": "A current successful PO/GRN match is required."}
-                )
         paid_amount = invoice.payments.filter(
             status=Payment.Status.PAID,
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
@@ -1016,7 +1040,7 @@ class PaymentListCreateAPIView(generics.ListCreateAPIView):
             paid_amount + requested_amount + serializer.validated_data["amount"]
             > invoice.total_amount
         ):
-            raise serializers.ValidationError({
+            raise ValidationError({
                 "amount": "Payment amount exceeds the invoice's outstanding balance."
             })
         payment = serializer.save(
@@ -1051,6 +1075,7 @@ class PaymentActionAPIView(APIView):
         transitions = {
             Payment.Status.PENDING: {
                 Payment.Status.APPROVED,
+                Payment.Status.REJECTED,
                 Payment.Status.CANCELLED,
             },
             Payment.Status.APPROVED: {
@@ -1071,16 +1096,51 @@ class PaymentActionAPIView(APIView):
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
 
+        rejection_reason = ""
+        if new_status == Payment.Status.REJECTED:
+            rejection_reason = request.data.get("rejection_reason", "")
+            if not isinstance(rejection_reason, str) or not rejection_reason.strip():
+                return Response(
+                    {"error": "A rejection reason is required."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+            rejection_reason = rejection_reason.strip()
+        elif new_status == Payment.Status.FAILED:
+            failure_reason = request.data.get("failure_reason", "")
+            if not isinstance(failure_reason, str) or not failure_reason.strip():
+                return Response(
+                    {"error": "A failure reason is required."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+
+        if new_status in {Payment.Status.APPROVED, Payment.Status.PROCESSING}:
+            try:
+                _validate_invoice_for_payment(invoice)
+            except ValidationError as exc:
+                return Response(
+                    exc.detail,
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+
         if new_status == Payment.Status.PAID:
-            reference = request.data.get("payment_reference", "").strip()
-            payment_date = safe_date(request.data.get("payment_date"))
-            if not reference or not payment_date:
+            supplied_reference = request.data.get("payment_reference", "")
+            if not isinstance(supplied_reference, str):
+                supplied_reference = ""
+            reference = supplied_reference.strip()
+            supplied_date = request.data.get("payment_date")
+            payment_date = safe_date(supplied_date)
+            if bool(reference) != bool(supplied_date) or (
+                supplied_date and payment_date is None
+            ):
                 return Response(
                     {
-                        "error": "A payment date and bank reference are required to record a completed payment."
+                        "error": "Provide both a valid payment date and reference, or neither for simulated completion."
                     },
                     status=http_status.HTTP_400_BAD_REQUEST,
                 )
+            if not reference:
+                reference = f"SIM-PAY-{payment.pk}-{uuid4().hex[:10].upper()}"
+                payment_date = timezone.localdate()
             if Payment.objects.filter(
                 payment_reference=reference,
                 status=Payment.Status.PAID,
@@ -1092,11 +1152,15 @@ class PaymentActionAPIView(APIView):
             payment.payment_reference = reference
             payment.payment_date = payment_date
 
+        previous_status = payment.status
         payment.status = new_status
+        if new_status == Payment.Status.REJECTED:
+            payment.rejection_reason = rejection_reason
         payment.save(update_fields=[
             "status",
             "payment_reference",
             "payment_date",
+            "rejection_reason",
             "updated_at",
         ])
         if new_status == Payment.Status.PAID:
@@ -1124,9 +1188,17 @@ class PaymentActionAPIView(APIView):
             payment.pk,
             {
                 "invoice_id": invoice.pk,
+                "previous_status": previous_status,
                 "status": payment.status,
                 "payment_reference": (
                     payment.payment_reference if payment.status == Payment.Status.PAID else ""
+                ),
+                "reason": (
+                    rejection_reason
+                    if payment.status == Payment.Status.REJECTED
+                    else request.data.get("failure_reason", "")
+                    if payment.status == Payment.Status.FAILED
+                    else ""
                 ),
             },
         )

@@ -45,7 +45,9 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
   `GROQ_API_KEY` is configured; no external extraction request is implied by
   local OCR verification.
 - Inbound email ingestion and a mailbox adapter are not implemented.
-- Payment records track manual payment requests and settlements; no bank
-  transfer is initiated.
+- Payment records track request approval/rejection and settlement history.
+  Payment processing in the tracking workflow is simulated for testing; no
+  bank transfer is initiated. Completing a simulated payment creates a
+  `SIM-PAY-*` reference and records the settlement date.
 - Reports and CSV exports are available, but no ERP/accounting provider
   connector or delivery/retry queue is implemented.
