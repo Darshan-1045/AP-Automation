@@ -66,16 +66,43 @@ class SupabaseInvoiceStorage(Storage):
             f"Supabase Storage could not {action} the invoice document."
         ) from exc
 
+   
     def _info(self, name):
         name = self._normalize_name(name)
+
         try:
             return self._bucket().info(name)
+
         except StorageApiError as exc:
-            if getattr(exc, "status", None) == 404:
+            # Supabase Storage may return HTTP 400 while its
+            # error payload indicates that the object is not found.
+            error_data = (
+                exc.args[0]
+                if exc.args and isinstance(exc.args[0], dict)
+                else {}
+            )
+
+            status_code = (
+                error_data.get("statusCode")
+                or error_data.get("status")
+                or getattr(exc, "status", None)
+            )
+
+            error_type = str(error_data.get("error", "")).lower()
+            message = str(error_data.get("message", "")).lower()
+
+            if (
+                str(status_code) == "404"
+                or error_type == "not_found"
+                or "object not found" in message
+            ):
                 return None
+
             self._raise_storage_error("read metadata for", exc)
+
         except (StorageException, httpx.HTTPError) as exc:
             self._raise_storage_error("read metadata for", exc)
+
 
     def _save(self, name, content):
         name = self._normalize_name(name)
