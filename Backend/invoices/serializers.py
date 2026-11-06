@@ -1,4 +1,5 @@
 
+import logging
 from decimal import Decimal
 import hashlib
 import re
@@ -19,6 +20,9 @@ from .models import (
     PurchaseOrderItem,
     Vendor,
 )
+from .storage_backends import SupabaseStorageError
+
+logger = logging.getLogger(__name__)
 
 MAX_INVOICE_FILE_SIZE = 25 * 1024 * 1024
 INVOICE_FILE_SIGNATURES = {
@@ -129,11 +133,31 @@ class InvoiceSerializer(serializers.ModelSerializer):
         return document
 
     def create(self, validated_data):
-        invoice = super().create(validated_data)
-        digest = getattr(self, "_document_sha256", "")
-        if digest:
-            invoice.document_sha256 = digest
-            invoice.save(update_fields=["document_sha256"])
+        invoice = Invoice(**validated_data)
+        initial_document_name = getattr(
+            validated_data.get("document"), "name", ""
+        )
+
+        try:
+            with transaction.atomic():
+                invoice.save()
+                digest = getattr(self, "_document_sha256", "")
+                if digest:
+                    invoice.document_sha256 = digest
+                    invoice.save(update_fields=["document_sha256"])
+        except Exception:
+            saved_document_name = invoice.document.name if invoice.document else ""
+            if (
+                saved_document_name
+                and saved_document_name != initial_document_name
+            ):
+                try:
+                    invoice.document.storage.delete(saved_document_name)
+                except (OSError, SupabaseStorageError):
+                    logger.exception(
+                        "Could not clean up an invoice document after database save failure."
+                    )
+            raise
         return invoice
 
     def validate(self, attrs):

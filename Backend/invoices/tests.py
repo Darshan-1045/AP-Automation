@@ -3,9 +3,9 @@ from datetime import date
 from datetime import timedelta
 import csv
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
 from django.core.management import call_command
@@ -32,6 +32,68 @@ from .models import (
     Vendor,
 )
 from .serializers import InvoiceSerializer
+from .storage_backends import SupabaseInvoiceStorage
+
+
+class SupabaseInvoiceStorageTests(SimpleTestCase):
+    @override_settings(
+        SUPABASE_URL="https://storage.example.test",
+        SUPABASE_SERVICE_ROLE_KEY="test-service-role-key",
+        SUPABASE_STORAGE_BUCKET="invoices",
+    )
+    @patch("invoices.storage_backends.create_client")
+    def test_uploads_pdf_and_image_without_upsert(self, create_client):
+        bucket = Mock()
+        bucket.info.return_value = None
+        client = Mock()
+        client.storage.from_.return_value = bucket
+        create_client.return_value = client
+        storage = SupabaseInvoiceStorage()
+
+        documents = (
+            ("invoice.pdf", b"%PDF-1.4 test document", "application/pdf"),
+            ("invoice.png", b"\x89PNG\r\n\x1a\n", "image/png"),
+        )
+        for filename, content, content_type in documents:
+            with self.subTest(filename=filename):
+                file = SimpleUploadedFile(filename, content)
+                stored_name = storage.save(f"invoices/{filename}", file)
+
+                self.assertTrue(stored_name.startswith("invoices/"))
+                bucket.upload.assert_called_with(
+                    stored_name,
+                    content,
+                    file_options={
+                        "content-type": content_type,
+                        "upsert": "false",
+                    },
+                )
+
+    @override_settings(
+        SUPABASE_URL="https://storage.example.test",
+        SUPABASE_SERVICE_ROLE_KEY="test-service-role-key",
+        SUPABASE_STORAGE_BUCKET="invoices",
+    )
+    @patch("invoices.storage_backends.create_client")
+    def test_reads_private_document_metadata_and_deletes_by_object_path(
+        self,
+        create_client,
+    ):
+        bucket = Mock()
+        bucket.info.return_value = {"metadata": {"size": "12"}}
+        bucket.download.return_value = b"private file"
+        client = Mock()
+        client.storage.from_.return_value = bucket
+        create_client.return_value = client
+        storage = SupabaseInvoiceStorage()
+
+        self.assertTrue(storage.exists("invoices/stored.pdf"))
+        self.assertEqual(storage.size("invoices/stored.pdf"), 12)
+        with storage.open("invoices/stored.pdf", "rb") as document:
+            self.assertEqual(document.read(), b"private file")
+
+        storage.delete("invoices/stored.pdf")
+        bucket.remove.assert_called_once_with(["invoices/stored.pdf"])
 
 
 def authenticated_client(user_label="default"):

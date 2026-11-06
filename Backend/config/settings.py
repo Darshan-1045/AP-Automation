@@ -22,6 +22,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "invoices")
+
 
 def env_bool(name, default=False):
     value = os.getenv(name)
@@ -190,6 +194,22 @@ if not DEBUG and not os.getenv("DB_PASSWORD"):
         "DB_PASSWORD must be configured when DEBUG is disabled."
     )
 
+if not DEBUG:
+    missing_storage_settings = [
+        setting
+        for setting in (
+            "SUPABASE_URL",
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "SUPABASE_STORAGE_BUCKET",
+        )
+        if not os.getenv(setting)
+    ]
+    if missing_storage_settings:
+        raise ImproperlyConfigured(
+            "Supabase invoice storage settings are missing: "
+            + ", ".join(missing_storage_settings)
+        )
+
 
 # ============================================================
 # PASSWORD VALIDATION
@@ -236,7 +256,11 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # Compressed and versioned static files for production
 STORAGES = {
     "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "BACKEND": (
+            "django.core.files.storage.FileSystemStorage"
+            if DEBUG
+            else "invoices.storage_backends.SupabaseInvoiceStorage"
+        ),
     },
     "staticfiles": {
         "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",

@@ -6,7 +6,7 @@ from django.http import FileResponse
 from django.db import transaction
 from django.db.models import Q, Sum
 from rest_framework import generics
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.parsers import MultiPartParser, FormParser
 
 from rest_framework.views import APIView
@@ -26,12 +26,20 @@ from .models import (
     VendorOnboardingHistory,
 )
 from .serializers import InvoiceSerializer, PaymentSerializer, VendorSerializer
-from .ocr_service import extract_invoice_text
+from .ocr_service import OCRDependencyError, extract_invoice_text
+from .storage_backends import SupabaseStorageError
 from .ai_extraction_service import extract_invoice_data
 from .invoice_validation_service import validate_invoice_data
 from .vendor_validation_service import validate_vendor_data
 
 logger = logging.getLogger(__name__)
+
+
+class InvoiceStorageUnavailable(APIException):
+    status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = "Invoice document storage is temporarily unavailable."
+    default_code = "storage_unavailable"
+
 
 INVOICE_DOCUMENT_CONTENT_TYPES = {
     ".pdf": "application/pdf",
@@ -85,13 +93,19 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
     serializer_class = InvoiceSerializer
 
     parser_classes = [MultiPartParser, FormParser]
+
     def perform_create(self, serializer):
 
         # 1. Save the original document first.
-        invoice = serializer.save()
+        try:
+            invoice = serializer.save()
+        except SupabaseStorageError as exc:
+            raise InvoiceStorageUnavailable() from exc
+
         invoice.status = Invoice.Status.PROCESSING
         invoice.save(update_fields=["status", "updated_at"])
         document_name = invoice.document.name or ""
+        uploaded_document = serializer.validated_data.get("document")
         record_audit_event(
             getattr(self, "request", None),
             "invoice.uploaded",
@@ -100,15 +114,14 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
             {
                 "file_type": document_name.rsplit(".", 1)[-1].lower()
                 if "." in document_name else "",
-                "file_size": invoice.document.size,
+                "file_size": uploaded_document.size if uploaded_document else 0,
             },
         )
 
         try:
             # 2. Extract text using OCR.
-            extracted_text = extract_invoice_text(
-                invoice.document.path
-            )
+            with invoice.document.open("rb") as document:
+                extracted_text = extract_invoice_text(document)
 
             if not extracted_text or not extracted_text.strip():
                 raise ValueError("No readable text found in the document.")
@@ -262,7 +275,7 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
                         line_item_objects
                     )
 
-        except Exception:
+        except Exception as exc:
             # Keep the uploaded document even if processing fails.
             logger.exception(
                 "Invoice processing failed for invoice ID %s",
@@ -271,8 +284,12 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
 
             invoice.status = Invoice.Status.REVIEW_REQUIRED
             invoice.processing_error = (
-                "Automatic processing failed. "
-                "Please review the document or retry processing."
+                str(exc)
+                if isinstance(exc, OCRDependencyError)
+                else (
+                    "Automatic processing failed. "
+                    "Please review the document or retry processing."
+                )
             )
 
             invoice.save(
@@ -306,8 +323,18 @@ class InvoiceDocumentAPIView(APIView):
                 f".{extension}",
                 "application/octet-stream",
             )
+            try:
+                document = invoice.document.open("rb")
+            except FileNotFoundError:
+                return Response(
+                    {"detail": "The stored invoice document is unavailable."},
+                    status=http_status.HTTP_404_NOT_FOUND,
+                )
+            except SupabaseStorageError as exc:
+                raise InvoiceStorageUnavailable() from exc
+
             response = FileResponse(
-                invoice.document.open("rb"),
+                document,
                 content_type=content_type,
                 as_attachment=False,
                 filename=filename,
