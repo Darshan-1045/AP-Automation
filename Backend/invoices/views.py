@@ -26,11 +26,13 @@ from .models import (
     InvoiceLineItem,
     InvoiceApprovalHistory,
     InvoiceMatchingResult,
+    OCRFieldVerification,
     ApprovalRule,
     Payment,
     Vendor,
     VendorOnboardingHistory,
 )
+from .ocr_accuracy import OCR_TRACKED_FIELDS, record_ocr_verifications
 from .serializers import InvoiceSerializer, PaymentSerializer, VendorSerializer
 from .ocr_service import OCRDependencyError, extract_invoice_text
 from .storage_backends import SupabaseStorageError
@@ -531,6 +533,7 @@ class InvoiceDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         )
         instance.delete()
 
+    @transaction.atomic
     def perform_update(self, serializer):
         existing = self.get_object()
         if existing.status in {
@@ -542,7 +545,20 @@ class InvoiceDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
                 "Approved, rejected, and paid invoices cannot be edited."
             )
         changed_fields = sorted(serializer.validated_data.keys())
+        verified_fields = (
+            OCR_TRACKED_FIELDS.intersection(serializer.validated_data.keys())
+        )
+        original_values = {
+            field_name: getattr(existing, field_name)
+            for field_name in verified_fields
+        }
         invoice = serializer.save()
+        record_ocr_verifications(
+            invoice,
+            original_values,
+            verified_fields,
+            self.request.user,
+        )
         record_audit_event(
             self.request,
             "invoice.manually_edited",

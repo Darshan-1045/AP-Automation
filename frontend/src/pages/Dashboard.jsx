@@ -26,9 +26,11 @@ function Dashboard() {
   } = useInvoices();
   const [analytics, setAnalytics] = useState(null);
   const [analyticsError, setAnalyticsError] = useState("");
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
 
   const refreshDashboard = () => {
     refreshInvoices();
+    setAnalyticsLoading(true);
     api.get("/dashboard/")
       .then(({ data }) => {
         setAnalytics(data);
@@ -40,7 +42,8 @@ function Dashboard() {
             requestError.message ||
             "Unable to load dashboard analytics.",
         );
-      });
+      })
+      .finally(() => setAnalyticsLoading(false));
   };
 
   useEffect(() => {
@@ -52,7 +55,8 @@ function Dashboard() {
             requestError.message ||
             "Unable to load dashboard analytics.",
         );
-      });
+      })
+      .finally(() => setAnalyticsLoading(false));
   }, []);
 
   const reviewCount = invoices.filter(
@@ -203,6 +207,53 @@ function Dashboard() {
         </div>
       )}
 
+      <section
+        aria-label="OCR accuracy"
+        className="rounded-xl border border-slate-200 bg-white p-5"
+      >
+        <p className="text-sm text-slate-500">OCR accuracy</p>
+        <p className="mt-2 text-2xl font-bold text-slate-900">
+          {analyticsLoading
+            ? "Loading..."
+            : analyticsError
+              ? "Unavailable"
+              : analytics?.ocr_accuracy?.label || "Unavailable"}
+        </p>
+        {analyticsLoading ? (
+          <p className="mt-1 text-sm text-slate-500">
+            Loading verified OCR field statistics...
+          </p>
+        ) : analyticsError ? (
+          <p role="alert" className="mt-1 text-sm text-amber-700">
+            Unable to load OCR accuracy: {analyticsError}
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-xs text-slate-500">
+              Verified fields: {analytics?.ocr_accuracy?.total_verified_fields ?? 0}
+              {" · "}Correct: {analytics?.ocr_accuracy?.correct_fields ?? 0}
+              {" · "}Incorrect: {analytics?.ocr_accuracy?.incorrect_fields ?? 0}
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              {analytics?.ocr_accuracy?.definition}
+            </p>
+            {analytics?.ocr_accuracy?.by_field_type?.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {analytics.ocr_accuracy.by_field_type.map((field) => (
+                  <span
+                    key={field.field_name}
+                    className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700"
+                  >
+                    {field.label}: {field.accuracy}% ({field.correct_fields}/
+                    {field.total_verified_fields})
+                  </span>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
       {/* Charts */}
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
         <InvoiceStatusChart invoices={invoices} />
@@ -232,15 +283,6 @@ function Dashboard() {
             </p>
             <p className="mt-1 text-xs text-slate-400">
               {analytics.processing_turnaround.definition}
-            </p>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white p-5">
-            <p className="text-sm text-slate-500">OCR accuracy</p>
-            <p className="mt-2 text-2xl font-bold text-slate-900">
-              {analytics.ocr_accuracy.label}
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              {analytics.ocr_accuracy.definition}
             </p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-white p-5 sm:col-span-2 xl:col-span-4">

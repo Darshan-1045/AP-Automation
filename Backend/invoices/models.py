@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 
 
 
@@ -124,6 +125,49 @@ class Invoice(models.Model):
 
     def __str__(self):
         return f"{self.invoice_number} - {self.vendor_name}"
+
+
+class OCRFieldVerification(models.Model):
+    class FieldName(models.TextChoices):
+        INVOICE_NUMBER = "invoice_number", "Invoice number"
+        VENDOR_NAME = "vendor_name", "Vendor name"
+        VENDOR_GSTIN = "vendor_gstin", "Vendor GSTIN"
+        INVOICE_DATE = "invoice_date", "Invoice date"
+        DUE_DATE = "due_date", "Due date"
+        SUBTOTAL = "subtotal", "Subtotal"
+        TAX_AMOUNT = "tax_amount", "GST / tax amount"
+        SHIPPING = "shipping", "Shipping"
+        TOTAL_AMOUNT = "total_amount", "Total amount"
+
+    invoice = models.ForeignKey(
+        Invoice,
+        on_delete=models.CASCADE,
+        related_name="ocr_field_verifications",
+    )
+    field_name = models.CharField(max_length=32, choices=FieldName.choices)
+    original_value = models.JSONField(null=True, blank=True)
+    verified_value = models.JSONField(null=True, blank=True)
+    is_correct = models.BooleanField()
+    verified_at = models.DateTimeField(auto_now_add=True)
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ocr_field_verifications",
+    )
+
+    class Meta:
+        ordering = ["-verified_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["invoice", "field_name", "-verified_at"],
+                name="ocr_verify_invoice_field_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.field_name} verification for invoice {self.invoice_id}"
 
 
 class InvoiceLineItem(models.Model):

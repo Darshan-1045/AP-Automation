@@ -46,6 +46,10 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
   entered the approval workflow require an administrator. Paid invoices and
   invoices with payment records are protected. Deletions are audited, including
   a snapshot of approval history.
+- Invoice review saves an OCR field-verification history for submitted
+  extracted fields. `GET /api/dashboard/` reports accuracy using the latest
+  verification for each invoice field; fields not yet reviewed are excluded,
+  and accuracy is unavailable until at least one field is verified.
 - PDF text extraction and image OCR are local integrations using pypdf,
   Poppler, and Tesseract. Groq extraction is attempted only when
   `GROQ_API_KEY` is configured; no external extraction request is implied by

@@ -1,12 +1,13 @@
 from collections import defaultdict
 from decimal import Decimal
 
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum, Window
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AuditEvent, Invoice, Payment
+from .models import AuditEvent, Invoice, OCRFieldVerification, Payment
 
 
 class DashboardAPIView(APIView):
@@ -134,6 +135,46 @@ class DashboardAPIView(APIView):
         for event in recent_activity:
             event["created_at"] = event["created_at"].isoformat()
 
+        latest_verifications = (
+            OCRFieldVerification.objects.annotate(
+                verification_rank=Window(
+                    expression=RowNumber(),
+                    partition_by=["invoice_id", "field_name"],
+                    order_by=["-verified_at", "-pk"],
+                ),
+            )
+            .filter(verification_rank=1)
+            .values("field_name")
+            .annotate(
+                total=Count("pk"),
+                correct=Count("pk", filter=Q(is_correct=True)),
+            )
+            .order_by("field_name")
+        )
+        field_labels = dict(OCRFieldVerification.FieldName.choices)
+        ocr_fields = []
+        total_verified = 0
+        total_correct = 0
+        for field in latest_verifications:
+            verified = field["total"]
+            correct = field["correct"]
+            total_verified += verified
+            total_correct += correct
+            ocr_fields.append({
+                "field_name": field["field_name"],
+                "label": field_labels[field["field_name"]],
+                "total_verified_fields": verified,
+                "correct_fields": correct,
+                "incorrect_fields": verified - correct,
+                "accuracy": round(correct / verified * 100, 1),
+            })
+
+        total_incorrect = total_verified - total_correct
+        accuracy_value = (
+            round(total_correct / total_verified * 100, 1)
+            if total_verified else None
+        )
+
         return Response({
             "invoice_count": len(invoices),
             "pending_approval_count": pending_approval,
@@ -171,11 +212,19 @@ class DashboardAPIView(APIView):
                 ),
             },
             "ocr_accuracy": {
-                "value": None,
-                "label": "Unavailable",
-                "definition": (
-                    "No structured OCR correction history is currently stored."
+                "value": accuracy_value,
+                "label": (
+                    f"{accuracy_value:.1f}%"
+                    if accuracy_value is not None
+                    else "Unavailable"
                 ),
+                "definition": (
+                    "Based on the latest verified value for each invoice field."
+                ),
+                "total_verified_fields": total_verified,
+                "correct_fields": total_correct,
+                "incorrect_fields": total_incorrect,
+                "by_field_type": ocr_fields,
             },
             "recent_activity": recent_activity,
         })

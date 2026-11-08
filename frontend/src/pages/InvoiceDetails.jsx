@@ -54,6 +54,7 @@ const InvoiceDetails = () => {
     setForm({
       invoice_number: data.invoice_number || "",
       vendor_name: data.vendor_name || "",
+      vendor_gstin: data.vendor_gstin || "",
       invoice_date: data.invoice_date || "",
       due_date: data.due_date || "",
       subtotal: data.subtotal ?? "",
@@ -463,6 +464,19 @@ const InvoiceDetails = () => {
 
             <div>
               <label className="text-sm font-medium text-slate-700">
+                Vendor GSTIN
+              </label>
+
+              <input
+                name="vendor_gstin"
+                value={form.vendor_gstin || ""}
+                onChange={handleChange}
+                className={inputClass}
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium text-slate-700">
                 Invoice Date
               </label>
 
@@ -507,7 +521,7 @@ const InvoiceDetails = () => {
 
             <div>
               <label className="text-sm font-medium text-slate-700">
-                Tax Amount
+                GST / Tax Amount
               </label>
 
               <input

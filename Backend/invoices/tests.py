@@ -25,6 +25,7 @@ from .models import (
     InvoiceApprovalHistory,
     InvoiceLineItem,
     InvoiceMatchingResult,
+    OCRFieldVerification,
     Payment,
     VendorOnboardingHistory,
     PurchaseOrder,
@@ -1445,6 +1446,11 @@ class DashboardAPIViewTests(TestCase):
         self.assertEqual(response.data["status_breakdown"], {"VALIDATED": 1})
         self.assertEqual(response.data["ocr_accuracy"]["value"], None)
         self.assertEqual(response.data["ocr_accuracy"]["label"], "Unavailable")
+        self.assertEqual(
+            response.data["ocr_accuracy"]["total_verified_fields"],
+            0,
+        )
+        self.assertEqual(response.data["ocr_accuracy"]["by_field_type"], [])
         self.assertEqual(response.data["vendor_analytics"][0]["vendor_name"], vendor.vendor_name)
 
     def test_dashboard_counts_partial_settlements_as_paid_and_outstanding(self):
@@ -1478,6 +1484,86 @@ class DashboardAPIViewTests(TestCase):
             response.data["currency_totals"]["INR"]["outstanding_value"],
             "75.00",
         )
+
+
+class OCRFieldVerificationTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(
+            username="ocr-reviewer",
+            password="secure-test-password",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.invoice = Invoice.objects.create(
+            invoice_number="OCR-INV-001",
+            vendor_name="OCR Vendor",
+            status=Invoice.Status.REVIEW_REQUIRED,
+        )
+        self.url = f"/api/invoices/{self.invoice.pk}/"
+
+    def test_review_saves_verifications_and_reopening_does_not_duplicate_fields(self):
+        payload = {
+            "invoice_number": "OCR-INV-001",
+            "vendor_name": "OCR Vendor",
+        }
+
+        first_response = self.client.patch(self.url, payload, format="json")
+        self.assertEqual(first_response.status_code, 200, first_response.data)
+        self.assertEqual(OCRFieldVerification.objects.count(), 2)
+
+        second_response = self.client.patch(self.url, payload, format="json")
+        self.assertEqual(second_response.status_code, 200, second_response.data)
+        self.assertEqual(OCRFieldVerification.objects.count(), 2)
+        self.assertEqual(
+            OCRFieldVerification.objects.filter(
+                verified_by=self.user,
+                is_correct=True,
+            ).count(),
+            2,
+        )
+
+    def test_correction_preserves_original_and_dashboard_uses_latest_verification(self):
+        self.client.patch(
+            self.url,
+            {
+                "invoice_number": "OCR-INV-001",
+                "vendor_name": "OCR Vendor",
+            },
+            format="json",
+        )
+        correction_response = self.client.patch(
+            self.url,
+            {"invoice_number": "CORRECTED-INV-001"},
+            format="json",
+        )
+
+        self.assertEqual(
+            correction_response.status_code,
+            200,
+            correction_response.data,
+        )
+        self.assertEqual(OCRFieldVerification.objects.count(), 3)
+        correction = OCRFieldVerification.objects.filter(
+            invoice=self.invoice,
+            field_name=OCRFieldVerification.FieldName.INVOICE_NUMBER,
+        ).order_by("-pk").first()
+        self.assertEqual(correction.original_value, "OCR-INV-001")
+        self.assertEqual(correction.verified_value, "CORRECTED-INV-001")
+        self.assertFalse(correction.is_correct)
+        self.assertEqual(correction.verified_by, self.user)
+
+        dashboard = self.client.get("/api/dashboard/")
+
+        self.assertEqual(dashboard.status_code, 200, dashboard.data)
+        accuracy = dashboard.data["ocr_accuracy"]
+        self.assertEqual(accuracy["value"], 50.0)
+        self.assertEqual(accuracy["total_verified_fields"], 2)
+        self.assertEqual(accuracy["correct_fields"], 1)
+        self.assertEqual(accuracy["incorrect_fields"], 1)
+        fields = {field["field_name"]: field for field in accuracy["by_field_type"]}
+        self.assertEqual(fields["invoice_number"]["accuracy"], 0.0)
+        self.assertEqual(fields["vendor_name"]["accuracy"], 100.0)
 
 
 class ProcurementMatchingTests(TestCase):
