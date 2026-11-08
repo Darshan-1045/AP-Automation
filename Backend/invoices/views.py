@@ -8,7 +8,11 @@ from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import (
+    APIException,
+    PermissionDenied,
+    ValidationError,
+)
 from rest_framework.parsers import MultiPartParser, FormParser
 
 from rest_framework.views import APIView
@@ -41,6 +45,24 @@ class InvoiceStorageUnavailable(APIException):
     status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
     default_detail = "Invoice document storage is temporarily unavailable."
     default_code = "storage_unavailable"
+
+
+class InvoiceDocumentDeletionFailed(APIException):
+    status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = (
+        "The invoice document could not be deleted. "
+        "The invoice record was not removed; please try again."
+    )
+    default_code = "document_deletion_failed"
+
+
+class InvoiceDeletionConflict(APIException):
+    status_code = http_status.HTTP_409_CONFLICT
+    default_detail = (
+        "This invoice has payment records and cannot be deleted. "
+        "Resolve its financial history before attempting deletion."
+    )
+    default_code = "invoice_has_payments"
 
 
 INVOICE_DOCUMENT_CONTENT_TYPES = {
@@ -426,9 +448,88 @@ class InvoiceBulkUploadAPIView(APIView):
         return Response({"results": results}, status=http_status.HTTP_200_OK)
 
 
-class InvoiceDetailAPIView(generics.RetrieveUpdateAPIView):
+class InvoiceDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Invoice.objects.prefetch_related("line_items").all()
     serializer_class = InvoiceSerializer
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response(
+            {"message": "Invoice deleted successfully."},
+            status=http_status.HTTP_200_OK,
+        )
+
+    def perform_destroy(self, instance):
+        instance = Invoice.objects.select_for_update().get(pk=instance.pk)
+        user = self.request.user
+        is_admin = (
+            user.is_staff
+            or user.is_superuser
+            or user.groups.filter(name="Admin").exists()
+        )
+
+        if (
+            instance.status == Invoice.Status.PAID
+            or instance.payment_date
+            or instance.payment_reference
+            or instance.payments.exists()
+        ):
+            raise InvoiceDeletionConflict()
+
+        deletable_statuses = {
+            Invoice.Status.UPLOADED,
+            Invoice.Status.PROCESSING,
+            Invoice.Status.REVIEW_REQUIRED,
+        }
+        if not is_admin and instance.status not in deletable_statuses:
+            raise PermissionDenied(
+                "Only an administrator can delete an invoice after it enters "
+                "the approval workflow."
+            )
+
+        document_name = instance.document.name if instance.document else ""
+        shared_document = bool(
+            document_name
+            and Invoice.objects.filter(document=document_name)
+            .exclude(pk=instance.pk)
+            .exists()
+        )
+        if document_name and not shared_document:
+            try:
+                instance.document.storage.delete(document_name)
+            except (SupabaseStorageError, OSError) as exc:
+                logger.exception(
+                    "Invoice document deletion failed for invoice ID %s",
+                    instance.pk,
+                )
+                raise InvoiceDocumentDeletionFailed() from exc
+
+        approval_history = [
+            {
+                "action": entry.action,
+                "remarks": entry.remarks,
+                "actor_username": entry.actor_username,
+                "approval_level": entry.approval_level,
+                "created_at": entry.created_at.isoformat(),
+            }
+            for entry in instance.approval_history.all()
+        ]
+        record_audit_event(
+            self.request,
+            "invoice.deleted",
+            "invoice",
+            instance.pk,
+            {
+                "invoice_number": instance.invoice_number,
+                "vendor_name": instance.vendor_name,
+                "status": instance.status,
+                "document_deleted": bool(document_name and not shared_document),
+                "approval_history": approval_history,
+            },
+        )
+        instance.delete()
 
     def perform_update(self, serializer):
         existing = self.get_object()

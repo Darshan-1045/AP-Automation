@@ -7,13 +7,29 @@ import useInvoices from "../hooks/useInvoices";
 import InvoiceTable from "../components/invoices/InvoiceTable";
 import InvoiceFilters from "../components/invoices/InvoiceFilters";
 import LoadingSpinner from "../components/common/LoadingSpinner";
+import Toast from "../components/common/Toast";
 
 const Invoices = () => {
-  const { invoices, loading, error, refreshInvoices } = useInvoices();
+  const {
+    invoices,
+    loading,
+    error,
+    refreshInvoices,
+    removeInvoice,
+  } = useInvoices();
   const navigate = useNavigate();
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ALL");
+  const [toast, setToast] = useState("");
+
+  const handleDeleted = (invoice) => {
+    removeInvoice(invoice.id);
+    setToast(
+      `${invoice.invoice_number || `Invoice ${invoice.id}`} was deleted.`,
+    );
+    refreshInvoices();
+  };
 
   const filteredInvoices = useMemo(() => {
     return invoices.filter((invoice) => {
@@ -108,6 +124,7 @@ const Invoices = () => {
           <InvoiceTable
             invoices={filteredInvoices}
             onView={(invoice) => navigate(`/invoices/${invoice.id}`)}
+            onDeleted={handleDeleted}
           />
 
           <p className="text-right text-xs text-slate-500">
@@ -115,6 +132,7 @@ const Invoices = () => {
           </p>
         </>
       )}
+      <Toast message={toast} onClose={() => setToast("")} />
     </div>
   );
 };

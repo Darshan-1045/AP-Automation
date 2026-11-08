@@ -10,13 +10,25 @@ import {
 
 import InvoiceUpload from "../components/invoices/InvoiceUpload";
 import StatusBadge from "../components/common/StatusBadge";
+import InvoiceDeleteAction from "../components/invoices/InvoiceDeleteAction";
+import Toast from "../components/common/Toast";
 
 const UploadInvoice = () => {
   const navigate = useNavigate();
   const [uploadResults, setUploadResults] = useState([]);
+  const [toast, setToast] = useState("");
 
   const handleUploadSuccess = (results) => {
     setUploadResults(results);
+  };
+
+  const handleDeleted = (invoice) => {
+    setUploadResults((results) =>
+      results.filter((result) => result.invoice?.id !== invoice.id),
+    );
+    setToast(
+      `${invoice.invoice_number || `Invoice ${invoice.id}`} was deleted.`,
+    );
   };
 
   return (
@@ -95,14 +107,20 @@ const UploadInvoice = () => {
                             {invoice.validation_errors.join(" ")}
                           </p>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => navigate(`/invoices/${invoice.id}`)}
-                          className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
-                        >
-                          Review Invoice
-                          <ArrowRight size={16} />
-                        </button>
+                        <div className="mt-4 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/invoices/${invoice.id}`)}
+                            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+                          >
+                            Review Invoice
+                            <ArrowRight size={16} />
+                          </button>
+                          <InvoiceDeleteAction
+                            invoice={invoice}
+                            onDeleted={handleDeleted}
+                          />
+                        </div>
                       </>
                     ) : (
                       <p className="mt-1 text-sm text-red-700">
@@ -118,6 +136,7 @@ const UploadInvoice = () => {
       )}
 
       <InvoiceUpload onUploadSuccess={handleUploadSuccess} />
+      <Toast message={toast} onClose={() => setToast("")} />
 
       <div className="rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="font-semibold text-slate-900">

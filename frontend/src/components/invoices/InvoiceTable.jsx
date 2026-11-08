@@ -2,8 +2,9 @@
 import { Eye, FileText } from "lucide-react";
 import { formatCurrency, formatDate } from "../../utils/formatters";
 import StatusBadge from "../common/StatusBadge";
+import InvoiceDeleteAction from "./InvoiceDeleteAction";
 
-const InvoiceTable = ({ invoices = [], onView }) => {
+const InvoiceTable = ({ invoices = [], onView, onDeleted }) => {
   if (!invoices.length) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white py-16 text-center">
@@ -70,13 +71,19 @@ const InvoiceTable = ({ invoices = [], onView }) => {
                 </td>
 
                 <td className="px-5 py-4 text-center">
-                  <button
-                    onClick={() => onView?.(invoice)}
-                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
-                  >
-                    <Eye size={15} />
-                    View
-                  </button>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      onClick={() => onView?.(invoice)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+                    >
+                      <Eye size={15} />
+                      View
+                    </button>
+                    <InvoiceDeleteAction
+                      invoice={invoice}
+                      onDeleted={onDeleted}
+                    />
+                  </div>
                 </td>
               </tr>
             ))}

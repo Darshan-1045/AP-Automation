@@ -14,6 +14,11 @@ const invoiceService = {
     return response.data;
   },
 
+  deleteInvoice: async (id) => {
+    const response = await api.delete(`/invoices/${id}/`);
+    return response.data;
+  },
+
   getInvoiceDocument: async (id) => {
     const response = await api.get(`/invoices/${id}/document/`, {
       responseType: "blob",

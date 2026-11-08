@@ -164,7 +164,11 @@ class SupabaseInvoiceStorage(Storage):
         name = self._normalize_name(name)
         try:
             self._bucket().remove([name])
-        except (StorageException, httpx.HTTPError) as exc:
+        except (
+            StorageApiError,
+            StorageException,
+            httpx.HTTPError,
+        ) as exc:
             self._raise_storage_error("delete", exc)
 
     def exists(self, name):

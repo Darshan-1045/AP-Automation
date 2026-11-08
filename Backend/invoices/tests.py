@@ -105,6 +105,155 @@ def authenticated_client(user_label="default"):
     return client
 
 
+class InvoiceDeletionTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(
+            username="invoice-delete-user",
+            password="secure-test-password",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def create_invoice(self, **overrides):
+        data = {
+            "invoice_number": "INV-DELETE-001",
+            "vendor_name": "Deletion test vendor",
+            "status": Invoice.Status.UPLOADED,
+        }
+        data.update(overrides)
+        return Invoice.objects.create(**data)
+
+    def test_anonymous_user_cannot_delete_invoice(self):
+        invoice = self.create_invoice()
+        response = APIClient().delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+
+    def test_draft_deletion_removes_related_records_and_audits_history(self):
+        invoice = self.create_invoice(document="invoices/delete-me.pdf")
+        InvoiceLineItem.objects.create(invoice=invoice, description="Test item")
+        InvoiceApprovalHistory.objects.create(
+            invoice=invoice,
+            action=InvoiceApprovalHistory.Action.APPROVED,
+            remarks="Approval history snapshot",
+            actor_username="approver",
+            approval_level=1,
+        )
+        InvoiceMatchingResult.objects.create(
+            invoice=invoice,
+            status=InvoiceMatchingResult.Status.NOT_FOUND,
+        )
+        storage = invoice.document.storage
+
+        with patch.object(storage, "delete") as storage_delete:
+            response = self.client.delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["message"], "Invoice deleted successfully.")
+        storage_delete.assert_called_once_with("invoices/delete-me.pdf")
+        self.assertFalse(Invoice.objects.filter(pk=invoice.pk).exists())
+        self.assertFalse(InvoiceLineItem.objects.filter(invoice_id=invoice.pk).exists())
+        self.assertFalse(
+            InvoiceMatchingResult.objects.filter(invoice_id=invoice.pk).exists()
+        )
+        deletion_event = AuditEvent.objects.get(
+            action="invoice.deleted",
+            entity_id=str(invoice.pk),
+        )
+        self.assertEqual(len(deletion_event.details["approval_history"]), 1)
+        self.assertEqual(
+            deletion_event.details["approval_history"][0]["actor_username"],
+            "approver",
+        )
+
+    def test_shared_document_is_not_deleted(self):
+        invoice = self.create_invoice(document="invoices/shared.pdf")
+        other_invoice = self.create_invoice(
+            invoice_number="INV-DELETE-002",
+            document="invoices/shared.pdf",
+        )
+        storage = invoice.document.storage
+
+        with patch.object(storage, "delete") as storage_delete:
+            response = self.client.delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        storage_delete.assert_not_called()
+        self.assertTrue(Invoice.objects.filter(pk=other_invoice.pk).exists())
+
+    def test_document_storage_failure_preserves_invoice_record(self):
+        invoice = self.create_invoice(document="invoices/unavailable.pdf")
+        storage = invoice.document.storage
+
+        with patch.object(
+            storage,
+            "delete",
+            side_effect=OSError("storage unavailable"),
+        ):
+            response = self.client.delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+        self.assertFalse(
+            AuditEvent.objects.filter(
+                action="invoice.deleted",
+                entity_id=str(invoice.pk),
+            ).exists()
+        )
+
+    def test_missing_invoice_returns_not_found(self):
+        response = self.client.delete("/api/invoices/999999/")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_non_admin_cannot_delete_invoice_in_approval_workflow(self):
+        invoice = self.create_invoice(status=Invoice.Status.APPROVED)
+
+        response = self.client.delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+
+    def test_admin_can_delete_approved_invoice_and_paid_invoice_is_protected(self):
+        from django.contrib.auth.models import Group
+
+        admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.user.groups.add(admin_group)
+        approved_invoice = self.create_invoice(status=Invoice.Status.APPROVED)
+
+        approved_response = self.client.delete(
+            f"/api/invoices/{approved_invoice.pk}/"
+        )
+
+        self.assertEqual(approved_response.status_code, 200)
+
+        paid_invoice = self.create_invoice(
+            invoice_number="INV-DELETE-PAID",
+            status=Invoice.Status.PAID,
+        )
+        paid_response = self.client.delete(f"/api/invoices/{paid_invoice.pk}/")
+
+        self.assertEqual(paid_response.status_code, 409)
+        self.assertTrue(Invoice.objects.filter(pk=paid_invoice.pk).exists())
+
+    def test_invoice_with_payment_record_cannot_be_deleted(self):
+        invoice = self.create_invoice(status=Invoice.Status.APPROVED)
+        Payment.objects.create(
+            invoice=invoice,
+            amount="100.00",
+            status=Payment.Status.FAILED,
+            payment_method=Invoice.PaymentMethod.BANK_TRANSFER,
+        )
+
+        response = self.client.delete(f"/api/invoices/{invoice.pk}/")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+        self.assertEqual(Payment.objects.filter(invoice=invoice).count(), 1)
+
+
 class AuthenticationTests(TestCase):
     def setUp(self):
         user_model = get_user_model()

@@ -32,6 +32,12 @@ const useInvoices = () => {
       setLoading(false);
     }
   }, []);
+
+  const removeInvoice = useCallback((invoiceId) => {
+    setInvoices((currentInvoices) =>
+      currentInvoices.filter((invoice) => invoice.id !== invoiceId),
+    );
+  }, []);
   
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -43,6 +49,7 @@ const useInvoices = () => {
     loading,
     error,
     refreshInvoices: fetchInvoices,
+    removeInvoice,
   };
 };
 
