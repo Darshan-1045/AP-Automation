@@ -75,6 +75,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "status",
             "extracted_text",
+            "vendor",
+            "vendor_resolution_status",
+            "extracted_vendor_details",
             "validation_status",
             "validation_errors",
             "validation_warnings",

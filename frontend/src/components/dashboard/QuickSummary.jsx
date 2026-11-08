@@ -1,49 +1,64 @@
 
 import { AlertCircle, CheckCircle2, FileClock } from "lucide-react";
 
-function QuickSummary({ invoices = [] }) {
-  const reviewCount = invoices.filter(
-    (invoice) =>
-      invoice.status === "REVIEW_REQUIRED" ||
-      invoice.validation_status === "REVIEW_REQUIRED"
-  ).length;
+const hasValidationItems = (value) => {
+  if (value == null) return false;
+  if (typeof value === "string") return Boolean(value.trim());
+  return Array.isArray(value) || typeof value === "object"
+    ? Object.keys(value).length > 0
+    : Boolean(value);
+};
 
-  const warningCount = invoices.reduce(
-    (total, invoice) =>
-      total + (invoice.validation_warnings?.length || 0),
-    0
-  );
-
-  const errorCount = invoices.filter(
-    (invoice) => Boolean(invoice.processing_error)
-  ).length;
-
-  const uploadedCount = invoices.filter(
-    (invoice) => invoice.status === "UPLOADED"
-  ).length;
+function QuickSummary({
+  invoices = [],
+  summary,
+  loading = false,
+}) {
+  const calculatedSummary = {
+    review_required_count: invoices.filter(
+      (invoice) =>
+        invoice.status === "REVIEW_REQUIRED" ||
+        invoice.validation_status === "REVIEW_REQUIRED"
+    ).length,
+    validation_issue_count: invoices.filter(
+      (invoice) =>
+        hasValidationItems(invoice.validation_warnings) ||
+        hasValidationItems(invoice.validation_errors) ||
+        invoice.validation_status === "INVALID"
+    ).length,
+    processing_error_count: invoices.filter(
+      (invoice) => Boolean((invoice.processing_error || "").trim())
+    ).length,
+    uploaded_count: invoices.filter(
+      (invoice) =>
+        ["UPLOADED", "PROCESSING"].includes(invoice.status) &&
+        !(invoice.processing_error || "").trim()
+    ).length,
+  };
+  const counts = summary || calculatedSummary;
 
   const items = [
     {
       label: "Invoices requiring review",
-      value: reviewCount,
+      value: counts.review_required_count,
       icon: AlertCircle,
       color: "text-amber-600 bg-amber-50",
     },
     {
-      label: "Validation warnings",
-      value: warningCount,
+      label: "Validation warnings / failures",
+      value: counts.validation_issue_count,
       icon: FileClock,
       color: "text-blue-600 bg-blue-50",
     },
     {
       label: "Processing errors",
-      value: errorCount,
+      value: counts.processing_error_count,
       icon: AlertCircle,
       color: "text-rose-600 bg-rose-50",
     },
     {
       label: "Uploaded invoices",
-      value: uploadedCount,
+      value: counts.uploaded_count,
       icon: CheckCircle2,
       color: "text-teal-600 bg-teal-50",
     },
@@ -79,7 +94,7 @@ function QuickSummary({ invoices = [] }) {
               </div>
 
               <span className="text-lg font-bold text-slate-800">
-                {item.value}
+                {loading ? "..." : item.value}
               </span>
             </div>
           );

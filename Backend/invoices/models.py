@@ -18,6 +18,14 @@ class Invoice(models.Model):
         REJECTED = "REJECTED", "Rejected"
         PAID = "PAID", "Paid"
 
+    class VendorResolutionStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        MATCHED = "MATCHED", "Matched"
+        NEW_VENDOR = "NEW_VENDOR", "New vendor"
+        INACTIVE = "INACTIVE", "Inactive vendor"
+        AMBIGUOUS = "AMBIGUOUS", "Ambiguous vendor"
+        UNRESOLVED = "UNRESOLVED", "Unresolved vendor"
+
     class PaymentMethod(models.TextChoices):
         BANK_TRANSFER = "BANK_TRANSFER", "Bank Transfer"
         UPI = "UPI", "UPI"
@@ -38,10 +46,23 @@ class Invoice(models.Model):
     )
 
     vendor_gstin = models.CharField(
-    max_length=15,
-    null=True,
-    blank=True,
-)
+        max_length=15,
+        null=True,
+        blank=True,
+    )
+    vendor = models.ForeignKey(
+        "Vendor",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="invoices",
+    )
+    vendor_resolution_status = models.CharField(
+        max_length=20,
+        choices=VendorResolutionStatus.choices,
+        default=VendorResolutionStatus.PENDING,
+    )
+    extracted_vendor_details = models.JSONField(default=dict, blank=True)
     po_number = models.CharField(max_length=100, blank=True, default="")
 
     invoice_date = models.DateField(null=True, blank=True)
@@ -478,7 +499,9 @@ class ApprovalRule(models.Model):
 class VendorOnboardingHistory(models.Model):
     vendor = models.ForeignKey(
         Vendor,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="onboarding_history",
     )
     previous_status = models.CharField(max_length=20, blank=True, default="")

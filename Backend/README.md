@@ -27,6 +27,11 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
 - `POST /api/auth/logout/` revokes the current token.
 - The frontend stores the token for refresh persistence and clears it on logout
   or an expired-token response.
+- `DELETE /api/invoices/vendors/{id}/` is restricted to staff, superusers,
+  Admins, and AP Managers. Only inactive vendors without invoice or procurement
+  references can be permanently deleted; deactivate vendors with financial
+  history instead. Vendor onboarding history is retained when a vendor is
+  removed.
 - Configure `EMAIL_BACKEND`, `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`,
   `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS`, `EMAIL_USE_SSL`, and
   `DEFAULT_FROM_EMAIL` for real outbound notifications. Development uses
@@ -35,8 +40,8 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
   `AP_APPROVAL_REMINDER_HOURS` (default 24) and escalates after
   `AP_APPROVAL_ESCALATION_HOURS` (default 72). Notifications go to active users
   with email addresses; Django groups and approval-rule labels do not restrict
-  application access or notification recipients. Schedule this command with
-  the deployment's task scheduler.
+  notification recipients. Schedule this command with the deployment's task
+  scheduler.
 
 ## Integration status
 
@@ -50,6 +55,10 @@ The frontend accepts `VITE_API_BASE_URL`; development defaults to
   extracted fields. `GET /api/dashboard/` reports accuracy using the latest
   verification for each invoice field; fields not yet reviewed are excluded,
   and accuracy is unavailable until at least one field is verified.
+- The dashboard `quick_summary` reports distinct invoices requiring manual
+  review, with validation warnings or failures, with a recorded processing
+  error, and awaiting processing. A review-required status alone is not a
+  processing error.
 - PDF text extraction and image OCR are local integrations using pypdf,
   Poppler, and Tesseract. Groq extraction is attempted only when
   `GROQ_API_KEY` is configured; no external extraction request is implied by

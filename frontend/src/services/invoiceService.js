@@ -32,6 +32,18 @@ const invoiceService = {
     return response.data;
   },
 
+  resolveInvoiceVendor: async (id, data) => {
+    const response = await api.post(`/invoices/${id}/resolve-vendor/`, data);
+    return response.data;
+  },
+
+  retryInvoiceProcessing: async (id) => {
+    const response = await api.post(`/invoices/${id}/process/`, {}, {
+      timeout: 180000,
+    });
+    return response.data;
+  },
+
   // Upload an invoice
   uploadInvoice: async (file) => {
     const formData = new FormData();

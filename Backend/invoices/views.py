@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from django.http import FileResponse
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics
@@ -14,6 +14,7 @@ from rest_framework.exceptions import (
     ValidationError,
 )
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import IsAuthenticated
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -37,8 +38,9 @@ from .serializers import InvoiceSerializer, PaymentSerializer, VendorSerializer
 from .ocr_service import OCRDependencyError, extract_invoice_text
 from .storage_backends import SupabaseStorageError
 from .ai_extraction_service import extract_invoice_data
-from .invoice_validation_service import validate_invoice_data
 from .vendor_validation_service import validate_vendor_data
+from .vendor_resolution import match_vendor, validate_resolved_invoice
+from .matching_service import match_invoice
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,11 @@ class InvoiceDeletionConflict(APIException):
         "Resolve its financial history before attempting deletion."
     )
     default_code = "invoice_has_payments"
+
+
+class VendorDeletionConflict(APIException):
+    status_code = http_status.HTTP_409_CONFLICT
+    default_code = "vendor_deletion_conflict"
 
 
 INVOICE_DOCUMENT_CONTENT_TYPES = {
@@ -126,6 +133,7 @@ def _validate_invoice_for_payment(invoice):
     vendor_validation = validate_vendor_data(
         invoice.vendor_name,
         invoice.vendor_gstin,
+        vendor=invoice.vendor,
     )
     if vendor_validation["status"] != "VERIFIED":
         raise ValidationError(
@@ -140,6 +148,106 @@ def _validate_invoice_for_payment(invoice):
             )
 
 
+def _process_invoice_document(invoice, request):
+    invoice.status = Invoice.Status.PROCESSING
+    invoice.save(update_fields=["status", "updated_at"])
+    try:
+            with invoice.document.open("rb") as document:
+                extracted_text = extract_invoice_text(document)
+            if not extracted_text or not extracted_text.strip():
+                raise ValueError("No readable text found in the document.")
+
+            invoice.extracted_text = extracted_text
+            invoice.save(update_fields=["extracted_text", "updated_at"])
+            record_audit_event(
+                request,
+                "invoice.ocr_completed",
+                "invoice",
+                invoice.pk,
+                {"extracted_character_count": len(extracted_text)},
+            )
+
+            extracted_data = extract_invoice_data(extracted_text)
+            if not isinstance(extracted_data, dict):
+                raise ValueError("AI returned an invalid invoice structure.")
+
+            with transaction.atomic():
+                invoice.invoice_number = extracted_data.get("invoice_number")
+                invoice.vendor_name = extracted_data.get("vendor_name")
+                invoice.vendor_gstin = extracted_data.get("vendor_gstin") or None
+                invoice.po_number = extracted_data.get("po_number") or ""
+                invoice.invoice_date = safe_date(extracted_data.get("invoice_date"))
+                invoice.due_date = safe_date(extracted_data.get("due_date"))
+                invoice.subtotal = safe_decimal(extracted_data.get("subtotal"))
+                invoice.tax_amount = safe_decimal(extracted_data.get("tax_amount"))
+                invoice.shipping = safe_decimal(extracted_data.get("shipping"))
+                invoice.total_amount = safe_decimal(extracted_data.get("total_amount"))
+                invoice.currency = extracted_data.get("currency") or invoice.currency
+
+                invoice.extracted_vendor_details = {
+                    field: extracted_data.get(source).strip()
+                    if isinstance(extracted_data.get(source), str)
+                    else ""
+                    for field, source in (
+                        ("address", "vendor_address"),
+                        ("email", "vendor_email"),
+                        ("phone", "vendor_phone"),
+                    )
+                }
+                vendor, resolution_status = match_vendor(
+                    invoice.vendor_name,
+                    invoice.vendor_gstin,
+                )
+                invoice.vendor = vendor
+                invoice.vendor_resolution_status = resolution_status
+                invoice.save()
+
+                invoice.line_items.all().delete()
+                line_items = extracted_data.get("line_items", [])
+                if isinstance(line_items, list):
+                    InvoiceLineItem.objects.bulk_create([
+                        InvoiceLineItem(
+                            invoice=invoice,
+                            item_code=item.get("item_code"),
+                            description=item.get("description"),
+                            quantity=safe_decimal(item.get("quantity")),
+                            unit_price=safe_decimal(item.get("unit_price")),
+                            amount=safe_decimal(item.get("amount")),
+                        )
+                        for item in line_items
+                        if isinstance(item, dict)
+                    ])
+
+                validation = validate_resolved_invoice(invoice, extracted_data)
+                record_audit_event(
+                    request,
+                    "invoice.validation_performed",
+                    "invoice",
+                    invoice.pk,
+                    {
+                        "status": validation["status"],
+                        "error_count": len(validation["errors"]),
+                        "warning_count": len(validation["warnings"]),
+                    },
+                )
+    except Exception as exc:
+            logger.exception("Invoice processing failed for invoice ID %s", invoice.pk)
+            invoice.status = Invoice.Status.REVIEW_REQUIRED
+            invoice.processing_error = (
+                str(exc)
+                if isinstance(exc, OCRDependencyError)
+                else "Automatic processing failed. Please review the document or retry processing."
+            )
+            invoice.save(update_fields=["status", "processing_error", "updated_at"])
+            record_audit_event(
+                request,
+                "invoice.processing_failed",
+                "invoice",
+                invoice.pk,
+                {"stage": "ocr_or_extraction"},
+            )
+
+
 class InvoiceListCreateAPIView(generics.ListCreateAPIView):
 
     queryset = Invoice.objects.all().order_by("-created_at")
@@ -148,15 +256,11 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def perform_create(self, serializer):
-
-        # 1. Save the original document first.
         try:
             invoice = serializer.save()
         except SupabaseStorageError as exc:
             raise InvoiceStorageUnavailable() from exc
 
-        invoice.status = Invoice.Status.PROCESSING
-        invoice.save(update_fields=["status", "updated_at"])
         document_name = invoice.document.name or ""
         uploaded_document = serializer.validated_data.get("document")
         record_audit_event(
@@ -170,195 +274,7 @@ class InvoiceListCreateAPIView(generics.ListCreateAPIView):
                 "file_size": uploaded_document.size if uploaded_document else 0,
             },
         )
-
-        try:
-            # 2. Extract text using OCR.
-            with invoice.document.open("rb") as document:
-                extracted_text = extract_invoice_text(document)
-
-            if not extracted_text or not extracted_text.strip():
-                raise ValueError("No readable text found in the document.")
-
-            invoice.extracted_text = extracted_text
-            invoice.save(update_fields=["extracted_text", "updated_at"])
-            record_audit_event(
-                getattr(self, "request", None),
-                "invoice.ocr_completed",
-                "invoice",
-                invoice.pk,
-                {"extracted_character_count": len(extracted_text)},
-            )
-
-            # 3. Extract structured invoice data using Groq.
-            extracted_data = extract_invoice_data(extracted_text)
-
-            if not isinstance(extracted_data, dict):
-                raise ValueError("AI returned an invalid invoice structure.")
-
-            # 4. Validate invoice fields.
-            validation = validate_invoice_data(extracted_data)
-
-            # 5. Verify vendor against the registered vendor master.
-            vendor_validation = validate_vendor_data(
-                extracted_data.get("vendor_name"),
-                extracted_data.get("vendor_gstin"),
-            )
-
-            # Add vendor verification warnings.
-            validation["warnings"].extend(
-                vendor_validation["warnings"]
-            )
-
-            # Unverified vendors must be reviewed manually.
-            if vendor_validation["status"] != "VERIFIED":
-                if validation["status"] == "VALID":
-                    validation["status"] = "REVIEW_REQUIRED"
-
-                validation["is_valid"] = False
-                
-            # 6. Check for duplicates using AI-extracted values too.
-            invoice_number = extracted_data.get("invoice_number")
-            vendor_name = extracted_data.get("vendor_name")
-
-            if invoice_number and vendor_name:
-                duplicate_exists = Invoice.objects.filter(
-                    invoice_number__iexact=invoice_number,
-                    vendor_name__iexact=vendor_name,
-                ).exclude(pk=invoice.pk).exists()
-
-                if duplicate_exists:
-                    validation["errors"].append(
-                        "Duplicate invoice number found for this vendor."
-                    )
-                    validation["status"] = "INVALID"
-                    validation["is_valid"] = False
-
-            # 7. Save extracted data and line items together.
-            with transaction.atomic():
-
-                invoice.invoice_number = extracted_data.get(
-                    "invoice_number"
-                )
-                invoice.vendor_name = extracted_data.get(
-                    "vendor_name"
-                )
-                invoice.vendor_gstin = (
-                    extracted_data.get("vendor_gstin") or None
-                )
-                invoice.po_number = extracted_data.get("po_number") or ""
-                invoice.invoice_date = safe_date(
-                    extracted_data.get("invoice_date")
-                )
-                invoice.due_date = safe_date(
-                    extracted_data.get("due_date")
-                )
-                invoice.subtotal = safe_decimal(
-                    extracted_data.get("subtotal")
-                )
-                invoice.tax_amount = safe_decimal(
-                    extracted_data.get("tax_amount")
-                )
-                invoice.shipping = safe_decimal(
-                    extracted_data.get("shipping")
-                )
-                invoice.total_amount = safe_decimal(
-                    extracted_data.get("total_amount")
-                )
-
-                # Keep the model default if AI cannot identify currency.
-                currency = extracted_data.get("currency")
-                if currency:
-                    invoice.currency = currency
-
-                invoice.validation_status = validation["status"]
-                invoice.validation_errors = validation["errors"]
-                invoice.validation_warnings = validation["warnings"]
-
-                # Validation is not the same as approval.
-                if validation["status"] == "VALID":
-                    invoice.status = Invoice.Status.VALIDATED
-                else:
-                    invoice.status = Invoice.Status.REVIEW_REQUIRED
-
-                invoice.processing_error = ""
-
-                invoice.save()
-                record_audit_event(
-                    getattr(self, "request", None),
-                    "invoice.validation_performed",
-                    "invoice",
-                    invoice.pk,
-                    {
-                        "status": validation["status"],
-                        "error_count": len(validation["errors"]),
-                        "warning_count": len(validation["warnings"]),
-                    },
-                )
-
-                # Replace existing line items safely if reprocessed.
-                invoice.line_items.all().delete()
-
-                line_items = extracted_data.get("line_items", [])
-
-                if isinstance(line_items, list):
-                    line_item_objects = []
-
-                    for item in line_items:
-                        if not isinstance(item, dict):
-                            continue
-
-                        line_item_objects.append(
-                            InvoiceLineItem(
-                                invoice=invoice,
-                                item_code=item.get("item_code"),
-                                description=item.get("description"),
-                                quantity=safe_decimal(
-                                    item.get("quantity")
-                                ),
-                                unit_price=safe_decimal(
-                                    item.get("unit_price")
-                                ),
-                                amount=safe_decimal(
-                                    item.get("amount")
-                                ),
-                            )
-                        )
-
-                    InvoiceLineItem.objects.bulk_create(
-                        line_item_objects
-                    )
-
-        except Exception as exc:
-            # Keep the uploaded document even if processing fails.
-            logger.exception(
-                "Invoice processing failed for invoice ID %s",
-                invoice.pk,
-            )
-
-            invoice.status = Invoice.Status.REVIEW_REQUIRED
-            invoice.processing_error = (
-                str(exc)
-                if isinstance(exc, OCRDependencyError)
-                else (
-                    "Automatic processing failed. "
-                    "Please review the document or retry processing."
-                )
-            )
-
-            invoice.save(
-                update_fields=[
-                    "status",
-                    "processing_error",
-                    "updated_at",
-                ]
-            )
-            record_audit_event(
-                getattr(self, "request", None),
-                "invoice.processing_failed",
-                "invoice",
-                invoice.pk,
-                {"stage": "ocr_or_extraction"},
-            )
+        _process_invoice_document(invoice, self.request)
 
 
 class InvoiceDocumentAPIView(APIView):
@@ -448,6 +364,211 @@ class InvoiceBulkUploadAPIView(APIView):
                 })
 
         return Response({"results": results}, status=http_status.HTTP_200_OK)
+
+
+class InvoiceVendorResolutionAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        invoice = get_object_or_404(
+            Invoice.objects.select_for_update().select_related("vendor"),
+            pk=pk,
+        )
+        if invoice.status in {
+            Invoice.Status.PENDING_APPROVAL,
+            Invoice.Status.APPROVED,
+            Invoice.Status.ESCALATED,
+            Invoice.Status.REJECTED,
+            Invoice.Status.PAID,
+        } or invoice.payments.exists():
+            return Response(
+                {"detail": "Vendor resolution is unavailable after financial approval or payment."},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+
+        vendor_id = request.data.get("vendor_id")
+        vendor_data = request.data.get("vendor")
+        if vendor_id is not None and vendor_data is not None:
+            return Response(
+                {"detail": "Choose an existing vendor or register a new one, not both."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        created_vendor = False
+        if vendor_id is not None:
+            vendor = get_object_or_404(
+                Vendor.objects.select_for_update(),
+                pk=vendor_id,
+            )
+        elif isinstance(vendor_data, dict):
+            allowed_fields = {
+                "vendor_name",
+                "gstin",
+                "address",
+                "email",
+                "phone",
+                "bank_account_name",
+                "bank_account_number",
+                "bank_ifsc",
+            }
+            registration_data = {
+                key: value
+                for key, value in vendor_data.items()
+                if key in allowed_fields
+            }
+            if not registration_data.get("gstin"):
+                registration_data["gstin"] = None
+            if not str(registration_data.get("vendor_name") or "").strip():
+                return Response(
+                    {"vendor_name": "Vendor name is required."},
+                    status=http_status.HTTP_400_BAD_REQUEST,
+                )
+
+            vendor, match_status = match_vendor(
+                registration_data.get("vendor_name"),
+                registration_data.get("gstin"),
+            )
+            if (
+                match_status == Invoice.VendorResolutionStatus.AMBIGUOUS
+                and not registration_data.get("gstin")
+            ):
+                return Response(
+                    {
+                        "detail": (
+                            "The vendor name is ambiguous without a GSTIN. "
+                            "Select the correct existing vendor or provide a verified GSTIN."
+                        )
+                    },
+                    status=http_status.HTTP_409_CONFLICT,
+                )
+            if vendor is None:
+                serializer = VendorSerializer(data=registration_data)
+                serializer.is_valid(raise_exception=True)
+                try:
+                    with transaction.atomic():
+                        vendor = serializer.save(
+                            is_active=True,
+                            onboarding_status=Vendor.OnboardingStatus.PENDING,
+                        )
+                except IntegrityError:
+                    logger.exception(
+                        "Vendor registration conflicted with a concurrent vendor write."
+                    )
+                    return Response(
+                        {
+                            "detail": (
+                                "A vendor with these details was registered concurrently. "
+                                "Select the existing vendor and retry."
+                            )
+                        },
+                        status=http_status.HTTP_409_CONFLICT,
+                    )
+                VendorOnboardingHistory.objects.create(
+                    vendor=vendor,
+                    previous_status="",
+                    new_status=vendor.onboarding_status,
+                    actor_username=request.user.get_username(),
+                )
+                record_audit_event(
+                    request,
+                    "vendor.created",
+                    "vendor",
+                    vendor.pk,
+                    {"fields": sorted(serializer.validated_data.keys())},
+                )
+                created_vendor = True
+        else:
+            return Response(
+                {"detail": "Provide vendor_id or vendor registration details."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        invoice.vendor = vendor
+        invoice.vendor_resolution_status = (
+            Invoice.VendorResolutionStatus.MATCHED
+            if vendor.is_active
+            else Invoice.VendorResolutionStatus.INACTIVE
+        )
+        invoice.save(update_fields=[
+            "vendor",
+            "vendor_resolution_status",
+            "updated_at",
+        ])
+        validation = validate_resolved_invoice(invoice)
+
+        matching_result = None
+        if invoice.po_number:
+            matching_result = match_invoice(invoice)
+
+        record_audit_event(
+            request,
+            "invoice.vendor_resolved",
+            "invoice",
+            invoice.pk,
+            {
+                "vendor_id": vendor.pk,
+                "created_vendor": created_vendor,
+                "validation_status": validation["status"],
+                "matching_status": matching_result.status if matching_result else "",
+            },
+        )
+        message = (
+            "Vendor registered and associated with this invoice. "
+            "Vendor onboarding approval is still required before approval or payment."
+            if created_vendor
+            else "Vendor associated with this invoice and validation resumed."
+        )
+        return Response(
+            {
+                "message": message,
+                "invoice": InvoiceSerializer(
+                    invoice,
+                    context={"request": request},
+                ).data,
+            },
+            status=http_status.HTTP_200_OK,
+        )
+
+
+class RetryInvoiceProcessingAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        invoice = get_object_or_404(
+            Invoice.objects.select_for_update(),
+            pk=pk,
+        )
+        if invoice.status in {
+            Invoice.Status.PENDING_APPROVAL,
+            Invoice.Status.APPROVED,
+            Invoice.Status.ESCALATED,
+            Invoice.Status.REJECTED,
+            Invoice.Status.PAID,
+        }:
+            return Response(
+                {"detail": "Invoice processing cannot be retried after approval workflow begins."},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+        if not invoice.document:
+            return Response(
+                {"detail": "No stored invoice document is available to process."},
+                status=http_status.HTTP_400_BAD_REQUEST,
+            )
+
+        record_audit_event(
+            request,
+            "invoice.processing_retry_requested",
+            "invoice",
+            invoice.pk,
+            {},
+        )
+        _process_invoice_document(invoice, request)
+        return Response(
+            InvoiceSerializer(invoice, context={"request": request}).data,
+            status=http_status.HTTP_200_OK,
+        )
 
 
 class InvoiceDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
@@ -571,90 +692,9 @@ class InvoiceDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             is_current=True,
         ).update(is_current=False)
 
-        validation_data = {
-            "invoice_number": invoice.invoice_number,
-            "vendor_name": invoice.vendor_name,
-            "vendor_gstin": invoice.vendor_gstin,
-            "invoice_date": (
-                invoice.invoice_date.isoformat()
-                if invoice.invoice_date else None
-            ),
-            "due_date": (
-                invoice.due_date.isoformat()
-                if invoice.due_date else None
-            ),
-            "subtotal": (
-                str(invoice.subtotal)
-                if invoice.subtotal is not None else None
-            ),
-            "tax_amount": (
-                str(invoice.tax_amount)
-                if invoice.tax_amount is not None else None
-            ),
-            "shipping": (
-                str(invoice.shipping)
-                if invoice.shipping is not None else None
-            ),
-            "total_amount": (
-                str(invoice.total_amount)
-                if invoice.total_amount is not None else None
-            ),
-            "currency": invoice.currency,
-            "line_items": [],
-        }
-
-        for item in invoice.line_items.all():
-            validation_data["line_items"].append({
-                "description": item.description,
-                "quantity": (
-                    str(item.quantity)
-                    if item.quantity is not None else None
-                ),
-                "unit_price": (
-                    str(item.unit_price)
-                    if item.unit_price is not None else None
-                ),
-                "amount": (
-                    str(item.amount)
-                    if item.amount is not None else None
-                ),
-            })
-        validation = validate_invoice_data(validation_data)
-
-        vendor_validation = validate_vendor_data(
-            invoice.vendor_name,
-            invoice.vendor_gstin,
-        )
-        validation["warnings"].extend(vendor_validation["warnings"])
-        if vendor_validation["status"] != "VERIFIED":
-            if validation["status"] == "VALID":
-                validation["status"] = "REVIEW_REQUIRED"
-            validation["is_valid"] = False
-
-        invoice.validation_status = validation["status"]
-        invoice.validation_errors = validation["errors"]
-        invoice.validation_warnings = validation["warnings"]
-
-        if invoice.status not in [
-            Invoice.Status.APPROVED,
-            Invoice.Status.REJECTED,
-            Invoice.Status.PAID,
-        ]:
-            invoice.approval_level = 0
-            invoice.status = (
-                Invoice.Status.VALIDATED
-                if validation["status"] == "VALID"
-                else Invoice.Status.REVIEW_REQUIRED
-            )
-
-        invoice.save(update_fields=[
-            "validation_status",
-            "validation_errors",
-            "validation_warnings",
-            "approval_level",
-            "status",
-            "updated_at",
-        ])
+        validation = validate_resolved_invoice(invoice)
+        invoice.approval_level = 0
+        invoice.save(update_fields=["approval_level", "updated_at"])
         record_audit_event(
             self.request,
             "invoice.validation_performed",
@@ -702,6 +742,7 @@ class InvoiceApprovalActionAPIView(APIView):
             vendor_validation = validate_vendor_data(
                 invoice.vendor_name,
                 invoice.vendor_gstin,
+                vendor=invoice.vendor,
             )
             if vendor_validation["status"] != "VERIFIED":
                 return Response(
@@ -935,6 +976,7 @@ class MarkInvoicePaidAPIView(APIView):
         vendor_validation = validate_vendor_data(
             invoice.vendor_name,
             invoice.vendor_gstin,
+            vendor=invoice.vendor,
         )
         if vendor_validation["status"] != "VERIFIED":
             return Response(
@@ -1060,9 +1102,23 @@ class VendorListCreateAPIView(generics.ListCreateAPIView):
         )
 
 
+class VendorChoiceListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        vendors = Vendor.objects.order_by("vendor_name").values(
+            "id",
+            "vendor_name",
+            "gstin",
+            "is_active",
+        )
+        return Response(list(vendors), status=http_status.HTTP_200_OK)
+
+
 class VendorDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Vendor.objects.all()
     serializer_class = VendorSerializer
+    permission_classes = [IsAuthenticated]
 
     def perform_update(self, serializer):
         existing = self.get_object()
@@ -1094,13 +1150,54 @@ class VendorDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             {"fields": sorted(updated_fields)},
         )
 
+    @transaction.atomic
     def perform_destroy(self, instance):
-        if (
-            instance.purchase_orders.exists()
-            or Invoice.objects.filter(vendor_name__iexact=instance.vendor_name).exists()
-        ):
-            raise ValidationError(
-                "Vendors referenced by invoices or purchase orders cannot be deleted."
+        user = self.request.user
+        can_delete_vendor = (
+            user.is_staff
+            or user.is_superuser
+            or user.groups.filter(name__in=["Admin", "AP Manager"]).exists()
+        )
+        if not can_delete_vendor:
+            raise PermissionDenied(
+                "Only an administrator or AP Manager can delete vendors."
+            )
+
+        instance = Vendor.objects.select_for_update().get(pk=instance.pk)
+        if instance.is_active:
+            raise VendorDeletionConflict(
+                "Active vendors cannot be deleted. Deactivate the vendor first."
+            )
+
+        purchase_orders = instance.purchase_orders.all()
+        purchase_order_numbers = purchase_orders.values_list(
+            "po_number",
+            flat=True,
+        )
+        invoice_filter = Q(po_number__in=purchase_order_numbers)
+        if instance.gstin:
+            invoice_filter |= (
+                Q(vendor_gstin__iexact=instance.gstin)
+                | (
+                    Q(vendor_name__iexact=instance.vendor_name)
+                    & (
+                        Q(vendor_gstin__isnull=True)
+                        | Q(vendor_gstin="")
+                        | Q(vendor_gstin__iexact=instance.gstin)
+                    )
+                )
+            )
+        else:
+            invoice_filter |= Q(vendor_name__iexact=instance.vendor_name)
+        invoices = Invoice.objects.filter(
+            invoice_filter | Q(vendor=instance)
+        )
+
+        if purchase_orders.exists() or invoices.exists():
+            raise VendorDeletionConflict(
+                "This vendor has invoice, payment, purchase order, or goods "
+                "receipt history and cannot be permanently deleted. Keep the "
+                "vendor inactive to retain its financial history."
             )
         record_audit_event(
             self.request,

@@ -26,6 +26,8 @@ The system enables users to upload invoices, extract invoice information using O
 - Support multiple invoice documents.
 - Store and manage uploaded invoices.
 - View invoice details and processing status.
+- Preserve invoices from unregistered vendors for review and allow vendor registration or explicit association without re-uploading.
+- Resolve an invoice's vendor with authenticated `POST /api/invoices/{id}/resolve-vendor/`; retry OCR on the saved document with `POST /api/invoices/{id}/process/`.
 
 ### 2. OCR-Based Data Extraction
 - Extract text from PDF and image invoices.
@@ -40,6 +42,7 @@ The system enables users to upload invoices, extract invoice information using O
 - Validate invoice amounts.
 - Perform tax and GST-related checks.
 - Validate vendor information.
+- Match vendors by GSTIN first and exact normalized name second; inactive or unresolved vendors remain in manual review.
 
 ### 4. Authentication and Authorization
 - User registration and login.

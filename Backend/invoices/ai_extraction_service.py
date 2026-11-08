@@ -29,6 +29,9 @@ def extract_invoice_data(ocr_text):
         "po_number": null,
         "invoice_date": null,
         "vendor_gstin": null,
+        "vendor_address": null,
+        "vendor_email": null,
+        "vendor_phone": null,
         "due_date": null,
         "subtotal": null,
         "tax_amount": null,
@@ -69,6 +72,8 @@ def extract_invoice_data(ocr_text):
     - Do not invent or reconstruct missing GSTIN characters.
     - Return null if GSTIN cannot be identified.
     - Do not confuse the vendor GSTIN with the buyer's GSTIN.
+    - Extract vendor address, email and phone only when printed on the invoice.
+    - Do not extract or infer vendor bank account details.
 
     Invoice OCR Text:
     {ocr_text}

@@ -7,6 +7,11 @@ const vendorService = {
     return response.data;
   },
 
+  getVendorOptions: async () => {
+    const response = await api.get("/invoices/vendors/options/");
+    return response.data;
+  },
+
   // Create vendor
   createVendor: async (data) => {
     const response = await api.post("/invoices/vendors/", data);

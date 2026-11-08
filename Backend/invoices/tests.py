@@ -2,6 +2,7 @@
 from datetime import date
 from datetime import timedelta
 import csv
+from decimal import Decimal
 from io import StringIO
 from unittest.mock import Mock, patch
 
@@ -10,6 +11,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
 from django.core.management import call_command
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.authtoken.models import Token
@@ -729,6 +731,294 @@ class InvoiceBulkUploadTests(TestCase):
         self.assertIn("already been uploaded", response.data["results"][1]["error"])
         invoice = Invoice.objects.get()
         self.assertEqual(len(invoice.document_sha256), 64)
+
+
+class InvoiceVendorDetectionTests(TestCase):
+    def setUp(self):
+        self.client = authenticated_client("vendor-detection")
+        self.extracted_data = {
+            "invoice_number": "NEW-VENDOR-001",
+            "vendor_name": "North Star Supplies",
+            "vendor_gstin": "27AAPFU0939F1ZV",
+            "vendor_address": "10 Market Road, Mumbai",
+            "vendor_email": "billing@northstar.example",
+            "vendor_phone": "+91 9876543210",
+            "po_number": None,
+            "invoice_date": "2026-10-28",
+            "due_date": "2026-11-27",
+            "subtotal": "100.00",
+            "tax_amount": "18.00",
+            "shipping": "0.00",
+            "total_amount": "118.00",
+            "currency": "INR",
+            "line_items": [],
+        }
+
+    def upload_invoice(self, extracted_data=None):
+        with (
+            patch(
+                "invoices.views.extract_invoice_text",
+                return_value="Invoice OCR text",
+            ),
+            patch(
+                "invoices.views.extract_invoice_data",
+                return_value=extracted_data or self.extracted_data,
+            ),
+        ):
+            return self.client.post(
+                "/api/invoices/",
+                {
+                    "document": SimpleUploadedFile(
+                        "vendor-invoice.pdf",
+                        b"%PDF-1.4 vendor invoice",
+                        content_type="application/pdf",
+                    )
+                },
+                format="multipart",
+            )
+
+    def test_unregistered_vendor_upload_is_preserved_for_review(self):
+        response = self.upload_invoice()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.status, Invoice.Status.REVIEW_REQUIRED)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.NEW_VENDOR,
+        )
+        self.assertIsNone(invoice.vendor)
+        self.assertTrue(invoice.document.name)
+        self.assertEqual(
+            invoice.extracted_vendor_details,
+            {
+                "address": "10 Market Road, Mumbai",
+                "email": "billing@northstar.example",
+                "phone": "+91 9876543210",
+            },
+        )
+        self.assertTrue(
+            any("New vendor detected" in item for item in invoice.validation_warnings)
+        )
+
+    def test_name_matching_is_normalized_and_does_not_require_gstin(self):
+        vendor = Vendor.objects.create(
+            vendor_name="North Star Supplies",
+            gstin="27AAPFU0939F1ZV",
+            onboarding_status=Vendor.OnboardingStatus.APPROVED,
+        )
+        extracted = {**self.extracted_data, "vendor_name": "  NORTH   STAR Supplies  ", "vendor_gstin": None}
+
+        response = self.upload_invoice(extracted)
+
+        self.assertEqual(response.status_code, 201, response.data)
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.vendor_id, vendor.pk)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.MATCHED,
+        )
+        self.assertEqual(invoice.status, Invoice.Status.REVIEW_REQUIRED)
+
+    def test_existing_gstin_match_is_associated_and_validated(self):
+        vendor = Vendor.objects.create(
+            vendor_name="North Star Supplies",
+            gstin="27AAPFU0939F1ZV",
+            onboarding_status=Vendor.OnboardingStatus.APPROVED,
+        )
+
+        response = self.upload_invoice()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        invoice = Invoice.objects.get()
+        self.assertEqual(invoice.vendor_id, vendor.pk)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.MATCHED,
+        )
+        self.assertEqual(invoice.status, Invoice.Status.VALIDATED)
+
+    def test_inactive_gstin_match_is_flagged_without_reactivation(self):
+        vendor = Vendor.objects.create(
+            vendor_name="North Star Supplies",
+            gstin="27AAPFU0939F1ZV",
+            is_active=False,
+            onboarding_status=Vendor.OnboardingStatus.APPROVED,
+        )
+
+        response = self.upload_invoice()
+
+        self.assertEqual(response.status_code, 201, response.data)
+        invoice = Invoice.objects.get()
+        vendor.refresh_from_db()
+        self.assertEqual(invoice.vendor_id, vendor.pk)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.INACTIVE,
+        )
+        self.assertFalse(vendor.is_active)
+        self.assertEqual(invoice.status, Invoice.Status.REVIEW_REQUIRED)
+
+    def test_exact_name_with_different_gstin_is_not_auto_merged(self):
+        Vendor.objects.create(
+            vendor_name="North Star Supplies",
+            gstin="27AAPFU0939F1ZV",
+            onboarding_status=Vendor.OnboardingStatus.APPROVED,
+        )
+        extracted = {
+            **self.extracted_data,
+            "vendor_gstin": "27AAACB2894G1ZV",
+        }
+
+        response = self.upload_invoice(extracted)
+
+        self.assertEqual(response.status_code, 201, response.data)
+        invoice = Invoice.objects.get()
+        self.assertIsNone(invoice.vendor)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.AMBIGUOUS,
+        )
+
+    def test_register_vendor_associates_existing_invoice_without_reupload(self):
+        self.upload_invoice()
+        invoice = Invoice.objects.get()
+        document_name = invoice.document.name
+
+        response = self.client.post(
+            f"/api/invoices/{invoice.pk}/resolve-vendor/",
+            {
+                "vendor": {
+                    "vendor_name": "North Star Supplies",
+                    "gstin": "27AAPFU0939F1ZV",
+                    "address": "10 Market Road, Mumbai",
+                    "email": "billing@northstar.example",
+                    "phone": "+91 9876543210",
+                    "bank_account_name": "",
+                    "bank_account_number": "",
+                    "bank_ifsc": "",
+                }
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(Invoice.objects.count(), 1)
+        invoice.refresh_from_db()
+        vendor = Vendor.objects.get()
+        self.assertEqual(invoice.vendor_id, vendor.pk)
+        self.assertEqual(invoice.document.name, document_name)
+        self.assertEqual(invoice.invoice_number, "NEW-VENDOR-001")
+        self.assertEqual(vendor.onboarding_status, Vendor.OnboardingStatus.PENDING)
+        self.assertEqual(vendor.bank_account_number, "")
+        self.assertEqual(invoice.status, Invoice.Status.REVIEW_REQUIRED)
+
+    def test_select_existing_vendor_resumes_validation(self):
+        vendor = Vendor.objects.create(
+            vendor_name="North Star Supplies",
+            gstin="27AAPFU0939F1ZV",
+            onboarding_status=Vendor.OnboardingStatus.APPROVED,
+        )
+        invoice = Invoice.objects.create(
+            invoice_number="SELECT-VENDOR-001",
+            vendor_name=vendor.vendor_name,
+            vendor_gstin=vendor.gstin,
+            invoice_date=date(2026, 10, 28),
+            due_date=date(2026, 11, 27),
+            subtotal=Decimal("100.00"),
+            tax_amount=Decimal("18.00"),
+            shipping=Decimal("0.00"),
+            total_amount=Decimal("118.00"),
+            status=Invoice.Status.REVIEW_REQUIRED,
+            vendor_resolution_status=Invoice.VendorResolutionStatus.NEW_VENDOR,
+        )
+
+        response = self.client.post(
+            f"/api/invoices/{invoice.pk}/resolve-vendor/",
+            {"vendor_id": vendor.pk},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.vendor_id, vendor.pk)
+        self.assertEqual(invoice.status, Invoice.Status.VALIDATED)
+        self.assertEqual(invoice.validation_status, "VALID")
+
+    def test_retry_reprocesses_stored_document_without_creating_invoice(self):
+        with (
+            patch(
+                "invoices.views.extract_invoice_text",
+                return_value="Invoice OCR text",
+            ),
+            patch(
+                "invoices.views.extract_invoice_data",
+                side_effect=RuntimeError("temporary extraction failure"),
+            ),
+        ):
+            upload_response = self.client.post(
+                "/api/invoices/",
+                {
+                    "document": SimpleUploadedFile(
+                        "retry-invoice.pdf",
+                        b"%PDF-1.4 retry document",
+                        content_type="application/pdf",
+                    )
+                },
+                format="multipart",
+            )
+        self.assertEqual(upload_response.status_code, 201, upload_response.data)
+        invoice = Invoice.objects.get()
+        document_name = invoice.document.name
+        self.assertTrue(invoice.processing_error)
+
+        with (
+            patch(
+                "invoices.views.extract_invoice_text",
+                return_value="Invoice OCR text",
+            ),
+            patch(
+                "invoices.views.extract_invoice_data",
+                return_value=self.extracted_data,
+            ),
+        ):
+            response = self.client.post(f"/api/invoices/{invoice.pk}/process/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(Invoice.objects.count(), 1)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.document.name, document_name)
+        self.assertEqual(invoice.invoice_number, "NEW-VENDOR-001")
+        self.assertFalse(invoice.processing_error)
+        self.assertEqual(
+            invoice.vendor_resolution_status,
+            Invoice.VendorResolutionStatus.NEW_VENDOR,
+        )
+
+    def test_vendor_resolution_requires_authentication(self):
+        invoice = Invoice.objects.create(
+            invoice_number="UNAUTH-001",
+            vendor_name="North Star Supplies",
+            vendor_resolution_status=Invoice.VendorResolutionStatus.NEW_VENDOR,
+        )
+        response = APIClient().post(
+            f"/api/invoices/{invoice.pk}/resolve-vendor/",
+            {"vendor_id": 1},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_vendor_choices_do_not_expose_bank_details(self):
+        vendor = Vendor.objects.create(
+            vendor_name="Protected Vendor",
+            bank_account_number="123456789012",
+        )
+
+        response = self.client.get("/api/invoices/vendors/options/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data[0]["id"], vendor.pk)
+        self.assertNotIn("bank_account_number", response.data[0])
 
 
 class InvoiceValidationTests(TestCase):
@@ -1477,13 +1767,70 @@ class DashboardAPIViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(
-            response.data["currency_totals"]["INR"]["paid_value"],
-            "25.00",
+            Decimal(response.data["currency_totals"]["INR"]["paid_value"]),
+            Decimal("25.00"),
         )
         self.assertEqual(
-            response.data["currency_totals"]["INR"]["outstanding_value"],
-            "75.00",
+            Decimal(response.data["currency_totals"]["INR"]["outstanding_value"]),
+            Decimal("75.00"),
         )
+
+    def test_quick_summary_counts_distinct_invoices_by_issue_and_workflow(self):
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-PAID",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.PAID,
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-VALIDATED-WARNING",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.VALIDATED,
+            validation_status="REVIEW_REQUIRED",
+            validation_warnings=["Missing due date.", "Missing tax."],
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-REVIEW",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.REVIEW_REQUIRED,
+            validation_status="REVIEW_REQUIRED",
+            validation_warnings=[],
+            validation_errors=[],
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-PROCESSING-FAILED",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.REVIEW_REQUIRED,
+            processing_error="OCR processing failed.",
+            validation_warnings=[],
+            validation_errors=[],
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-INVALID",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.REVIEW_REQUIRED,
+            validation_status="INVALID",
+            validation_errors=["Invalid invoice date."],
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-UPLOADED",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.UPLOADED,
+        )
+        Invoice.objects.create(
+            invoice_number="INV-SUMMARY-PROCESSING",
+            vendor_name="Summary Vendor",
+            status=Invoice.Status.PROCESSING,
+        )
+
+        response = authenticated_client().get("/api/dashboard/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["quick_summary"], {
+            "review_required_count": 4,
+            "validation_issue_count": 2,
+            "processing_error_count": 1,
+            "uploaded_count": 2,
+        })
 
 
 class OCRFieldVerificationTests(TestCase):
@@ -1564,6 +1911,155 @@ class OCRFieldVerificationTests(TestCase):
         fields = {field["field_name"]: field for field in accuracy["by_field_type"]}
         self.assertEqual(fields["invoice_number"]["accuracy"], 0.0)
         self.assertEqual(fields["vendor_name"]["accuracy"], 100.0)
+
+
+class VendorDeletionTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.admin = user_model.objects.create_user(
+            username="vendor-delete-admin",
+            password="secure-test-password",
+        )
+        admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.admin.groups.add(admin_group)
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(user=self.admin)
+
+    def create_vendor(self, **overrides):
+        values = {
+            "vendor_name": "Vendor Deletion Test",
+            "gstin": "27AAPFU0939F1ZV",
+            "is_active": False,
+        }
+        values.update(overrides)
+        return Vendor.objects.create(**values)
+
+    def delete_vendor(self, client, vendor_id):
+        return client.delete(f"/api/invoices/vendors/{vendor_id}/")
+
+    def test_inactive_vendor_without_financial_references_can_be_deleted(self):
+        vendor = self.create_vendor()
+        history = VendorOnboardingHistory.objects.create(
+            vendor=vendor,
+            previous_status="",
+            new_status=Vendor.OnboardingStatus.PENDING,
+        )
+        audit = AuditEvent.objects.create(
+            actor="vendor-delete-admin",
+            action="vendor.reviewed",
+            entity_type="vendor",
+            entity_id=str(vendor.pk),
+        )
+
+        response = self.delete_vendor(self.admin_client, vendor.pk)
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Vendor.objects.filter(pk=vendor.pk).exists())
+        history.refresh_from_db()
+        self.assertIsNone(history.vendor_id)
+        self.assertTrue(AuditEvent.objects.filter(pk=audit.pk).exists())
+
+    def test_active_vendor_must_be_deactivated_before_deletion(self):
+        vendor = self.create_vendor(is_active=True)
+
+        response = self.delete_vendor(self.admin_client, vendor.pk)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Deactivate", response.data["detail"])
+        self.assertTrue(Vendor.objects.filter(pk=vendor.pk).exists())
+
+    def test_invoice_and_payment_references_prevent_vendor_deletion(self):
+        vendor = self.create_vendor()
+        invoice = Invoice.objects.create(
+            invoice_number="INV-VENDOR-DELETE-001",
+            vendor_name=vendor.vendor_name,
+            vendor_gstin=vendor.gstin,
+            total_amount="100.00",
+            status=Invoice.Status.PAID,
+        )
+        payment = Payment.objects.create(
+            invoice=invoice,
+            amount="100.00",
+            status=Payment.Status.PAID,
+            payment_method=Invoice.PaymentMethod.BANK_TRANSFER,
+        )
+
+        response = self.delete_vendor(self.admin_client, vendor.pk)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Keep the vendor inactive", response.data["detail"])
+        self.assertTrue(Vendor.objects.filter(pk=vendor.pk).exists())
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+        self.assertTrue(Payment.objects.filter(pk=payment.pk).exists())
+
+    def test_purchase_order_and_goods_receipt_references_prevent_deletion(self):
+        vendor = self.create_vendor(
+            gstin="29ABCDE1234F1ZV",
+        )
+        purchase_order = PurchaseOrder.objects.create(
+            po_number="PO-VENDOR-DELETE-001",
+            vendor=vendor,
+            po_date=date(2026, 11, 1),
+        )
+        receipt = GoodsReceiptNote.objects.create(
+            grn_number="GRN-VENDOR-DELETE-001",
+            purchase_order=purchase_order,
+            received_date=date(2026, 11, 2),
+        )
+
+        response = self.delete_vendor(self.admin_client, vendor.pk)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(Vendor.objects.filter(pk=vendor.pk).exists())
+        self.assertTrue(PurchaseOrder.objects.filter(pk=purchase_order.pk).exists())
+        self.assertTrue(GoodsReceiptNote.objects.filter(pk=receipt.pk).exists())
+
+    def test_vendor_with_financial_history_can_be_deactivated_and_retained(self):
+        vendor = self.create_vendor(
+            vendor_name="Vendor With History",
+            gstin="29ABCDE1234F1ZV",
+            is_active=True,
+        )
+        invoice = Invoice.objects.create(
+            invoice_number="INV-VENDOR-ARCHIVE-001",
+            vendor_name=vendor.vendor_name,
+        )
+        user = get_user_model().objects.create_user(
+            username="vendor-archive-user",
+            password="secure-test-password",
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.patch(
+            f"/api/invoices/vendors/{vendor.pk}/",
+            {"is_active": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        vendor.refresh_from_db()
+        self.assertFalse(vendor.is_active)
+        self.assertTrue(Invoice.objects.filter(pk=invoice.pk).exists())
+
+    def test_vendor_deletion_requires_permission(self):
+        vendor = self.create_vendor()
+        user = get_user_model().objects.create_user(
+            username="vendor-delete-unauthorized",
+            password="secure-test-password",
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = self.delete_vendor(client, vendor.pk)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Vendor.objects.filter(pk=vendor.pk).exists())
+
+    def test_missing_vendor_returns_not_found_to_authorized_user(self):
+        response = self.delete_vendor(self.admin_client, 999999)
+
+        self.assertEqual(response.status_code, 404)
 
 
 class ProcurementMatchingTests(TestCase):

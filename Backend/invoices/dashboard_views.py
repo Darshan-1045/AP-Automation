@@ -14,6 +14,51 @@ class DashboardAPIView(APIView):
     def get(self, request):
         today = timezone.localdate()
         invoices = list(Invoice.objects.all().order_by("-created_at"))
+        quick_summary = {
+            "review_required_count": 0,
+            "validation_issue_count": 0,
+            "processing_error_count": 0,
+            "uploaded_count": 0,
+        }
+
+        def has_validation_items(value):
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return bool(value.strip())
+            try:
+                return len(value) > 0
+            except TypeError:
+                return bool(value)
+
+        for invoice in invoices:
+            processing_error = (invoice.processing_error or "").strip()
+
+            if (
+                invoice.status == Invoice.Status.REVIEW_REQUIRED
+                or invoice.validation_status == "REVIEW_REQUIRED"
+            ):
+                quick_summary["review_required_count"] += 1
+
+            if (
+                has_validation_items(invoice.validation_warnings)
+                or has_validation_items(invoice.validation_errors)
+                or invoice.validation_status == "INVALID"
+            ):
+                quick_summary["validation_issue_count"] += 1
+
+            if processing_error:
+                quick_summary["processing_error_count"] += 1
+
+            if (
+                invoice.status in {
+                    Invoice.Status.UPLOADED,
+                    Invoice.Status.PROCESSING,
+                }
+                and not processing_error
+            ):
+                quick_summary["uploaded_count"] += 1
+
         paid_by_invoice = dict(
             Payment.objects.filter(status=Payment.Status.PAID)
             .values("invoice_id")
@@ -177,6 +222,7 @@ class DashboardAPIView(APIView):
 
         return Response({
             "invoice_count": len(invoices),
+            "quick_summary": quick_summary,
             "pending_approval_count": pending_approval,
             "overdue_invoice_count": overdue_count,
             "status_breakdown": dict(status_breakdown),

@@ -6,6 +6,8 @@ from .views import (
     InvoiceListCreateAPIView,
     InvoiceDetailAPIView,
     InvoiceDocumentAPIView,
+    InvoiceVendorResolutionAPIView,
+    RetryInvoiceProcessingAPIView,
     ApproveInvoiceAPIView,
     RejectInvoiceAPIView,
     MarkInvoicePaidAPIView,
@@ -13,6 +15,7 @@ from .views import (
     PaymentAdviceAPIView,
     PaymentListCreateAPIView,
     VendorListCreateAPIView,
+    VendorChoiceListAPIView,
     VendorDetailAPIView,
 )
 from .procurement_views import (
@@ -60,6 +63,16 @@ urlpatterns = [
         name="invoice-document",
     ),
     path(
+        "<int:pk>/resolve-vendor/",
+        InvoiceVendorResolutionAPIView.as_view(),
+        name="invoice-resolve-vendor",
+    ),
+    path(
+        "<int:pk>/process/",
+        RetryInvoiceProcessingAPIView.as_view(),
+        name="invoice-retry-processing",
+    ),
+    path(
         "<int:pk>/approve/",
         ApproveInvoiceAPIView.as_view(),
         name="invoice-approve",
@@ -78,6 +91,11 @@ urlpatterns = [
     "vendors/",
     VendorListCreateAPIView.as_view(),
     name="vendor-list-create",
+    ),
+    path(
+    "vendors/options/",
+    VendorChoiceListAPIView.as_view(),
+    name="vendor-options",
     ),
     path(
         "vendors/<int:pk>/",

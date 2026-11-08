@@ -234,6 +234,10 @@ function Dashboard() {
               {" · "}Correct: {analytics?.ocr_accuracy?.correct_fields ?? 0}
               {" · "}Incorrect: {analytics?.ocr_accuracy?.incorrect_fields ?? 0}
             </p>
+            <p className="mt-1 text-xs text-slate-500">
+              Based on {analytics?.ocr_accuracy?.total_verified_fields ?? 0}{" "}
+              verified fields.
+            </p>
             <p className="mt-1 text-xs text-slate-400">
               {analytics?.ocr_accuracy?.definition}
             </p>
@@ -336,7 +340,11 @@ function Dashboard() {
       )}
 
       {/* Summary */}
-      <QuickSummary invoices={invoices} />
+      <QuickSummary
+        invoices={invoices}
+        summary={analytics?.quick_summary}
+        loading={analyticsLoading}
+      />
 
       {/* Recent invoices */}
       <RecentInvoices invoices={invoices} />

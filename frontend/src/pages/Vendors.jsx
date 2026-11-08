@@ -37,6 +37,9 @@ const Vendors = () => {
 
   const [showModal, setShowModal] = useState(false);
   const [selectedVendor, setSelectedVendor] = useState(null);
+  const [vendorToDelete, setVendorToDelete] = useState(null);
+  const [deletingVendorId, setDeletingVendorId] = useState(null);
+  const [deactivatingVendorId, setDeactivatingVendorId] = useState(null);
   const [form, setForm] = useState(emptyForm);
 
   const [submitting, setSubmitting] = useState(false);
@@ -181,22 +184,52 @@ const Vendors = () => {
   };
 
   const handleDelete = async (vendor) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${vendor.vendor_name}?`
-    );
-
-    if (!confirmed) return;
-
     try {
+      setDeletingVendorId(vendor.id);
+      setError("");
+      setSuccess("");
       await vendorService.deleteVendor(vendor.id);
       setVendors((previous) =>
         previous.filter((item) => item.id !== vendor.id)
       );
       setSuccess("Vendor deleted successfully.");
+      setVendorToDelete(null);
+      await fetchVendors(true);
     } catch (err) {
-      setError(
-        err.response?.data?.detail || "Unable to delete vendor."
+      const data = err.response?.data;
+      const message =
+        typeof data === "string"
+          ? data
+          : data?.detail ||
+            "Unable to delete vendor. Please try again.";
+      setError(message);
+    } finally {
+      setDeletingVendorId(null);
+    }
+  };
+
+  const handleDeactivate = async (vendor) => {
+    try {
+      setDeactivatingVendorId(vendor.id);
+      setError("");
+      setSuccess("");
+      await vendorService.updateVendor(vendor.id, { is_active: false });
+      setVendors((previous) =>
+        previous.map((item) =>
+          item.id === vendor.id ? { ...item, is_active: false } : item
+        )
       );
+      setSuccess(
+        `${vendor.vendor_name} was deactivated and retained for its financial history.`
+      );
+    } catch (err) {
+      const data = err.response?.data;
+      setError(
+        data?.detail ||
+          "Unable to deactivate vendor. Please try again."
+      );
+    } finally {
+      setDeactivatingVendorId(null);
     }
   };
 
@@ -262,6 +295,57 @@ const Vendors = () => {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {vendorToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-vendor-title"
+            className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+          >
+            <h2
+              id="delete-vendor-title"
+              className="text-lg font-semibold text-slate-100"
+            >
+              Delete vendor?
+            </h2>
+            <p className="mt-2 text-sm text-slate-300">
+              Permanently delete {vendorToDelete.vendor_name}? Vendors with
+              invoices, payments, purchase orders, or goods receipts must
+              remain inactive to preserve their financial history.
+            </p>
+            {error && (
+              <p
+                role="alert"
+                className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300"
+              >
+                {error}
+              </p>
+            )}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={deletingVendorId !== null}
+                onClick={() => setVendorToDelete(null)}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingVendorId !== null}
+                onClick={() => handleDelete(vendorToDelete)}
+                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deletingVendorId === vendorToDelete.id
+                  ? "Deleting..."
+                  : "Delete Vendor"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -428,13 +512,37 @@ const Vendors = () => {
                         >
                           <Pencil size={15} />
                         </button>
-                        <button
-                          onClick={() => handleDelete(vendor)}
-                          title="Delete vendor"
-                          className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-red-500/50 hover:text-red-400"
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                        {vendor.is_active ? (
+                          <button
+                            onClick={() => handleDeactivate(vendor)}
+                            disabled={
+                              deactivatingVendorId !== null ||
+                              deletingVendorId !== null
+                            }
+                            title="Deactivate vendor and retain its history"
+                            className="rounded-lg border border-slate-700 px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-amber-500/50 hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {deactivatingVendorId === vendor.id
+                              ? "Deactivating..."
+                              : "Deactivate"}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setError("");
+                              setSuccess("");
+                              setVendorToDelete(vendor);
+                            }}
+                            disabled={
+                              deletingVendorId !== null ||
+                              deactivatingVendorId !== null
+                            }
+                            title="Delete inactive vendor"
+                            className="rounded-lg border border-slate-700 p-2 text-slate-400 transition hover:border-red-500/50 hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

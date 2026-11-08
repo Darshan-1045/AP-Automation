@@ -15,6 +15,7 @@ import {
 import invoiceService from "../services/invoiceService";
 import StatusBadge from "../components/common/StatusBadge";
 import LoadingSpinner from "../components/common/LoadingSpinner";
+import InvoiceVendorResolution from "../components/invoices/InvoiceVendorResolution";
 import { formatCurrency } from "../utils/formatters";
 
 const normalizeLineItems = (items = []) =>
@@ -265,6 +266,13 @@ const InvoiceDetails = () => {
     }
   };
 
+  const handleVendorResolved = (updatedInvoice, message) => {
+    setInvoice(updatedInvoice);
+    populateForm(updatedInvoice);
+    setError("");
+    setSuccess(message || "Vendor associated with the invoice.");
+  };
+
   if (loading) {
     return (
       <div className="flex min-h-[400px] items-center justify-center">
@@ -331,6 +339,11 @@ const InvoiceDetails = () => {
           {success}
         </div>
       )}
+
+      <InvoiceVendorResolution
+        invoice={invoice}
+        onResolved={handleVendorResolved}
+      />
 
       {/* Validation Results */}
       {(invoice.validation_errors?.length > 0 ||

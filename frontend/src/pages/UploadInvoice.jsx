@@ -11,6 +11,7 @@ import {
 import InvoiceUpload from "../components/invoices/InvoiceUpload";
 import StatusBadge from "../components/common/StatusBadge";
 import InvoiceDeleteAction from "../components/invoices/InvoiceDeleteAction";
+import InvoiceVendorResolution from "../components/invoices/InvoiceVendorResolution";
 import Toast from "../components/common/Toast";
 
 const UploadInvoice = () => {
@@ -29,6 +30,17 @@ const UploadInvoice = () => {
     setToast(
       `${invoice.invoice_number || `Invoice ${invoice.id}`} was deleted.`,
     );
+  };
+
+  const handleVendorResolved = (updatedInvoice, message) => {
+    setUploadResults((results) =>
+      results.map((result) =>
+        result.invoice?.id === updatedInvoice.id
+          ? { ...result, invoice: updatedInvoice }
+          : result,
+      ),
+    );
+    setToast(message || "Vendor associated with the invoice.");
   };
 
   return (
@@ -107,6 +119,12 @@ const UploadInvoice = () => {
                             {invoice.validation_errors.join(" ")}
                           </p>
                         )}
+                        <div className="mt-4">
+                          <InvoiceVendorResolution
+                            invoice={invoice}
+                            onResolved={handleVendorResolved}
+                          />
+                        </div>
                         <div className="mt-4 flex flex-wrap items-center gap-2">
                           <button
                             type="button"
